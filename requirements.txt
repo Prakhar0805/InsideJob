@@ -1,0 +1,16 @@
+# InsideJob top-level requirements.
+#
+# The two big dependencies are vendored, not pulled from PyPI, because both are
+# forks whose exact commit matters for reproducibility (see VENDOR.md):
+#
+#   pip install -e ./agentdojo   # Progent-instrumented AgentDojo fork
+#   pip install -e ./progent     # Progent policy engine (package name: secagent)
+#
+# Everything below is what *our* code in src/ needs on top of those.
+
+python-dotenv>=1.0.1
+openai>=1.59.7          # also used for Groq + Gemini via OpenAI-compatible endpoints
+tenacity>=8.2.3         # retry/backoff on free-tier throttling
+pydantic>=2.7.1
+pandas>=2.2.0           # results aggregation
+pytest>=8.0.0
