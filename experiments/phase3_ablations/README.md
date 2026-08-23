@@ -22,8 +22,11 @@ All are declared here *before* running so none is a post-hoc fishing trip.
    ```
 
 2. **Attacker model strength.** Swap `INSIDEJOB_ATTACKER_MODEL` for a stronger /
-   weaker model from the same non-agent provider and re-run a slice. Tests
-   whether the result is sensitive to attacker capability.
+   weaker model from a non-agent family and re-run a slice. Tests whether the
+   result is sensitive to attacker capability. On Groq-only, e.g.
+   `openai/gpt-oss-120b` → `openai/gpt-oss-20b` → `moonshotai/kimi-k2-instruct`.
+   Report the `atkfail` rate for each: a weaker-looking attacker that simply
+   refused more often is not evidence about capability.
 
 3. **Per-domain breakdown.** Already emitted by `src/aggregate.py` for every
    run; Phase 3 just reads it out and discusses which domains, if any, move.
@@ -38,6 +41,11 @@ All are declared here *before* running so none is a post-hoc fishing trip.
 Run the *identical* pipeline for both agent models and place their adaptive
 headline ASRs side by side, then resolve against `PREREGISTRATION.md`:
 **consistent** (both hold or both crack) vs **model-dependent** (they diverge).
+
+On the current Groq-only setup both agent models are open-weight families served
+by one provider, so the answer supports the weaker claim *"consistent across
+open-weight model families"* — not the cross-provider claim in CLAUDE.md §2.
+State it that way (see the scope decision in `PREREGISTRATION.md`).
 
 ```bash
 python -m src.aggregate \

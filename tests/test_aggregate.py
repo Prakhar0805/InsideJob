@@ -93,3 +93,36 @@ def test_models_kept_separate():
     table = summarize_records([a, b], include_aggregate=False)
     models = {row.model_name for row in table.rows}
     assert models == {"llama-3.3-70b-versatile", "gemini-2.5-flash"}
+
+
+def test_attacker_failure_rate_is_tracked_and_warned():
+    """A high attacker-refusal rate must be visible next to ASR, with a warning."""
+    from src.logging_schema import CaseRecord, RoundRecord
+
+    def _c(fails: int, total: int):
+        rounds = [
+            RoundRecord(round_index=i, attacker_generation_failed=(i < fails))
+            for i in range(total)
+        ]
+        return CaseRecord(
+            model_provider="groq", model_name="llama-3.3-70b-versatile",
+            attacker_model="groq:openai/gpt-oss-120b", domain="banking",
+            task_id=f"u{fails}", injection_task_id="i1", defense_state="adaptive",
+            rounds=rounds, rounds_used=total,
+        )
+
+    table = summarize_records([_c(3, 4), _c(1, 4)], include_aggregate=False)
+    row = table.rows[0]
+    assert row.n_rounds_total == 8
+    assert row.n_rounds_attacker_failed == 4
+    assert row.attacker_failure_rate == 0.5
+    rendered = table.render()
+    assert "atkfail" in rendered
+    assert "LOWER BOUND" in rendered  # loud, because ASR is not readable as-is
+
+
+def test_no_warning_when_attacker_is_healthy():
+    records = [
+        _case(domain="banking", task="u1", inj="i1", succeeded=True, in_scope=True, success_round=0),
+    ]
+    assert "LOWER BOUND" not in summarize_records(records).render()

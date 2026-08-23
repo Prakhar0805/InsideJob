@@ -106,3 +106,46 @@ def test_feedback_summaries_are_distinct_per_outcome():
     assert "ignored" in ignored
     assert "SUCCESS (in-scope)" in hit
     assert "OUT OF SCOPE" in escaped
+
+
+def test_fallback_marks_generation_failed_when_model_refused(monkeypatch):
+    """A refusing attacker must be recorded, not silently counted as a weak round.
+
+    Otherwise a high refusal rate would depress ASR for a reason that has nothing
+    to do with the defence, and the results would read as "the defence held".
+    """
+    ctx = _ctx(history=[AttemptFeedback(0, "seed", blocked=True, blocked_tools=["send_money"],
+                                        executed_tools=[], within_scope=True, attack_succeeded=False)])
+    monkeypatch.setattr(
+        "src.attacker.simple_completion",
+        lambda *a, **k: "I'm sorry, but I can't help with that.",
+    )
+    attempt = _attacker().propose(ctx)
+    assert attempt.generation_failed is True
+    assert "refusal_or_unparseable" in attempt.generation_note
+    assert "sorry" in attempt.generation_note
+
+
+def test_api_error_is_recorded_as_generation_failure(monkeypatch):
+    ctx = _ctx(history=[AttemptFeedback(0, "seed", blocked=False, blocked_tools=[],
+                                        executed_tools=[], within_scope=True, attack_succeeded=False)])
+
+    def _boom(*a, **k):
+        raise RuntimeError("upstream 503")
+
+    monkeypatch.setattr("src.attacker.simple_completion", _boom)
+    attempt = _attacker().propose(ctx)
+    assert attempt.generation_failed is True
+    assert "api_error" in attempt.generation_note
+
+
+def test_successful_generation_is_not_marked_failed(monkeypatch):
+    ctx = _ctx(history=[AttemptFeedback(0, "seed", blocked=False, blocked_tools=[],
+                                        executed_tools=[], within_scope=True, attack_succeeded=False)])
+    monkeypatch.setattr(
+        "src.attacker.simple_completion",
+        lambda *a, **k: '{"strategy":"x","injections":{"injection_incoming_transaction":"y"}}',
+    )
+    attempt = _attacker().propose(ctx)
+    assert attempt.generation_failed is False
+    assert attempt.generation_note == ""

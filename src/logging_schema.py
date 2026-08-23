@@ -60,6 +60,11 @@ class RoundRecord(BaseModel):
     scope_reason: str = ""
     error: str | None = None
     duration_s: float = 0.0
+    #: The attacker model refused, errored, or returned an unusable payload and
+    #: the deterministic fallback ran instead. Recorded so a depressed ASR
+    #: caused by attacker refusal is never mistaken for defence strength.
+    attacker_generation_failed: bool = False
+    attacker_generation_note: str = ""
 
 
 class CaseRecord(BaseModel):

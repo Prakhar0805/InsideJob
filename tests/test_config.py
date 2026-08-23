@@ -23,30 +23,62 @@ def test_model_spec_parse_rejects_bad_input():
         ModelSpec.parse("groq:")
 
 
-def test_agent_and_attacker_must_differ_in_provider():
-    with pytest.raises(ValueError, match="different providers"):
+def test_family_inference():
+    from src.config import infer_family
+
+    assert infer_family("llama-3.3-70b-versatile") == "llama"
+    assert infer_family("openai/gpt-oss-120b") == "gpt-oss"
+    assert infer_family("moonshotai/kimi-k2-instruct") == "kimi"
+    assert infer_family("qwen/qwen3-32b") == "qwen"
+    assert infer_family("gemini-2.5-flash") == "gemini"
+    # Ordering matters: a DeepSeek distill mentions llama but is not one.
+    assert infer_family("deepseek-r1-distill-llama-70b") == "deepseek"
+    # Unknown models get their own id as family (permissive, and flagged).
+    assert infer_family("some-new-model-v9") == "some-new-model-v9"
+    assert ModelSpec("groq", "llama-3.3-70b-versatile").family_is_known is True
+    assert ModelSpec("groq", "some-new-model-v9").family_is_known is False
+
+
+def test_agent_and_attacker_must_differ_in_family():
+    with pytest.raises(ValueError, match="model family"):
         Settings(
-            agent=ModelSpec("groq", "a"),
-            attacker=ModelSpec("groq", "b"),
-            policy=ModelSpec("groq", "a"),
+            agent=ModelSpec("groq", "llama-3.3-70b-versatile"),
+            attacker=ModelSpec("groq", "llama-3.1-8b-instant"),  # same family
+            policy=ModelSpec("groq", "llama-3.3-70b-versatile"),
         ).validate_roles()
 
 
-def test_policy_model_must_not_be_attacker_provider():
-    with pytest.raises(ValueError, match="system\nunder test|system under test"):
+def test_policy_model_must_not_share_attacker_family():
+    with pytest.raises(ValueError, match="same family"):
         Settings(
-            agent=ModelSpec("groq", "a"),
-            attacker=ModelSpec("gemini", "b"),
-            policy=ModelSpec("gemini", "c"),  # policy on attacker's provider: illegal
+            agent=ModelSpec("groq", "llama-3.3-70b-versatile"),
+            attacker=ModelSpec("groq", "openai/gpt-oss-120b"),
+            policy=ModelSpec("groq", "openai/gpt-oss-20b"),  # attacker's family: illegal
         ).validate_roles()
 
 
-def test_valid_role_assignment_passes():
-    Settings(
+def test_groq_only_setup_is_valid_when_families_differ():
+    """The Groq-only configuration must pass: different families, one provider."""
+    settings = Settings(
+        agent=ModelSpec("groq", "llama-3.3-70b-versatile"),
+        attacker=ModelSpec("groq", "openai/gpt-oss-120b"),
+        policy=ModelSpec("groq", "llama-3.3-70b-versatile"),
+    )
+    settings.validate_roles()
+    # ...but the weaker separation must be reported, not silently accepted.
+    note = settings.separation_note()
+    assert "CAVEAT" in note
+    assert "share provider" in note
+
+
+def test_cross_provider_setup_has_no_caveat():
+    settings = Settings(
         agent=ModelSpec("groq", "llama-3.3-70b-versatile"),
         attacker=ModelSpec("gemini", "gemini-2.5-flash"),
         policy=ModelSpec("groq", "llama-3.3-70b-versatile"),
-    ).validate_roles()
+    )
+    settings.validate_roles()
+    assert "CAVEAT" not in settings.separation_note()
 
 
 def test_default_base_urls():

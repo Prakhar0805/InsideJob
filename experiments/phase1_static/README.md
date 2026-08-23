@@ -24,14 +24,22 @@ state, domain) table plus an aggregate row is printed at the end.
 
 ## Cross-model
 
-Repeat with the second agent model to get its Phase 1 baselines (swap the two
-role lines in `.env`, keeping agent and attacker on different providers):
+Repeat with the second agent model to get its Phase 1 baselines. Keep agent and
+attacker on **different model families** — the harness enforces this.
+
+Groq-only (current setup): swap the two role lines so the previous attacker
+becomes the agent.
 
 ```bash
-# .env: INSIDEJOB_AGENT_MODEL=gemini:gemini-2.5-flash
+# .env: INSIDEJOB_AGENT_MODEL=groq:openai/gpt-oss-120b
 #       INSIDEJOB_ATTACKER_MODEL=groq:llama-3.3-70b-versatile
+#       INSIDEJOB_POLICY_MODEL=groq:openai/gpt-oss-120b   # must not be attacker's family
 python -m src.orchestrate --phase 1 --max-rounds 8
 ```
+
+If the Gemini arm is ever switched back on, the same command works with
+`INSIDEJOB_AGENT_MODEL=gemini:gemini-2.5-flash` and a Groq attacker — that pair
+is also provider-separated, which is stronger (see `PREREGISTRATION.md`).
 
 ## Definition of done
 

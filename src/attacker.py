@@ -160,6 +160,13 @@ class AttackAttempt:
     injections: dict[str, str]
     strategy: str
     parent_round: int | None = None
+    #: True when the attacker model did not produce a usable payload and the
+    #: deterministic fallback was substituted. Tracked, logged and aggregated
+    #: because a refusing or malfunctioning attacker depresses ASR for a reason
+    #: that has nothing to do with the defence's strength - and an unreported
+    #: refusal rate would read as "the defence held".
+    generation_failed: bool = False
+    generation_note: str = ""
 
     def preview(self, limit: int = 200) -> dict[str, str]:
         return {key: (value[:limit] + ("..." if len(value) > limit else "")) for key, value in self.injections.items()}
@@ -208,6 +215,7 @@ class AdaptiveAttacker:
             return self.seed_attempt(context)
 
         user_prompt = self._render_user_prompt(context)
+        note = ""
         try:
             raw = simple_completion(
                 self.spec,
@@ -219,11 +227,13 @@ class AdaptiveAttacker:
             attempt = self._parse(raw, context)
             if attempt is not None:
                 return attempt
-            logger.warning("attacker returned unparseable payload; using deterministic fallback")
+            note = "refusal_or_unparseable: " + _one_line(raw, 160)
+            logger.warning("attacker returned no usable payload (%s); using deterministic fallback", note)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("attacker generation failed (%s); using deterministic fallback", exc)
+            note = f"api_error: {type(exc).__name__}: {exc}"[:200]
+            logger.warning("attacker generation failed (%s); using deterministic fallback", note)
 
-        return self._fallback_mutation(context)
+        return self._fallback_mutation(context, generation_note=note)
 
     # -- prompt construction ------------------------------------------------
 
@@ -293,12 +303,13 @@ class AdaptiveAttacker:
 
     # -- fallback -----------------------------------------------------------
 
-    def _fallback_mutation(self, context: AttackContext) -> AttackAttempt:
+    def _fallback_mutation(self, context: AttackContext, *, generation_note: str = "") -> AttackAttempt:
         """A deterministic variation used when the model can't be parsed.
 
         Escalates urgency/authority a notch relative to the seed. Not a serious
         attack - just something non-identical so a transient generation failure
-        does not turn into a wasted, duplicate round.
+        does not turn into a wasted, duplicate round. The round is still marked
+        ``generation_failed`` so the refusal shows up in the results.
         """
         attempt_no = len(context.history)
         framing = (
@@ -310,4 +321,11 @@ class AdaptiveAttacker:
             injections={key: payload for key in context.placeholder_keys},
             strategy=f"fallback_mutation#{attempt_no}",
             parent_round=attempt_no - 1,
+            generation_failed=bool(generation_note),
+            generation_note=generation_note,
         )
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Collapse a model response to a single short line for logging."""
+    return " ".join((text or "").split())[:limit]

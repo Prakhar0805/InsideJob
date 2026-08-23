@@ -141,10 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"[insidejob] {args.suite} | defense={args.defense} attack={args.attack_mode} "
-        f"(state={state}) | agent={settings.agent} attacker={settings.attacker} | "
-        f"{total} cases -> {out_path}",
+        f"(state={state}) | {total} cases -> {out_path}",
         file=sys.stderr,
     )
+    # Printed every run, not just once: the quality of attacker/agent separation
+    # is a caveat on the result, and it belongs in the run log next to the
+    # numbers rather than only in .env (CLAUDE.md section 5).
+    print(f"[insidejob] roles: {settings.separation_note()}", file=sys.stderr)
 
     done = 0
     ran = 0

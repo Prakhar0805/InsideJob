@@ -39,6 +39,46 @@ DEFAULT_BASE_URL: Final[dict[str, str]] = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
 }
 
+#: Model-family inference rules, checked in order (first substring match wins).
+#: Order matters: "deepseek-r1-distill-llama-70b" is a DeepSeek model that
+#: mentions llama, and "openai/gpt-oss-120b" must not fall through to a generic
+#: "gpt" rule.
+_FAMILY_RULES: Final[tuple[tuple[str, str], ...]] = (
+    ("gpt-oss", "gpt-oss"),
+    ("deepseek", "deepseek"),
+    ("kimi", "kimi"),
+    ("qwen", "qwen"),
+    ("gemma", "gemma"),
+    ("gemini", "gemini"),
+    ("mixtral", "mistral"),
+    ("mistral", "mistral"),
+    ("llama", "llama"),
+    ("claude", "claude"),
+    ("gpt-", "gpt"),
+)
+
+
+def infer_family(model: str) -> str:
+    """Best-effort model-family label, e.g. ``llama``, ``gpt-oss``, ``kimi``.
+
+    Family, not provider, is what CLAUDE.md section 5's separation rule is
+    actually about: the stated reason is to avoid *correlated failure* between
+    attacker and agent, and correlation comes from shared training lineage, not
+    from which company serves the HTTP endpoint. Groq hosts several unrelated
+    families, so family-level separation is achievable on a single provider.
+
+    An unrecognised model is given its own id as its family. That is the
+    permissive choice - two unknown models will be treated as different - but
+    refusing to run on any model this table has not heard of would break on
+    every new release, and the separation check is a guard against an obvious
+    mistake, not a proof of independence.
+    """
+    lowered = model.lower()
+    for needle, family in _FAMILY_RULES:
+        if needle in lowered:
+            return family
+    return lowered
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -46,6 +86,15 @@ class ModelSpec:
 
     provider: str
     model: str
+
+    @property
+    def family(self) -> str:
+        """The model's family (see :func:`infer_family`)."""
+        return infer_family(self.model)
+
+    @property
+    def family_is_known(self) -> bool:
+        return self.family != self.model.lower()
 
     @classmethod
     def parse(cls, spec: str) -> "ModelSpec":
@@ -103,7 +152,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         agent = ModelSpec.parse(os.getenv("INSIDEJOB_AGENT_MODEL", "groq:llama-3.3-70b-versatile"))
-        attacker = ModelSpec.parse(os.getenv("INSIDEJOB_ATTACKER_MODEL", "gemini:gemini-2.5-flash"))
+        attacker = ModelSpec.parse(os.getenv("INSIDEJOB_ATTACKER_MODEL", "groq:openai/gpt-oss-120b"))
         policy_raw = os.getenv("INSIDEJOB_POLICY_MODEL", "").strip()
         policy = ModelSpec.parse(policy_raw) if policy_raw else agent
         settings = cls(agent=agent, attacker=attacker, policy=policy)
@@ -113,29 +162,60 @@ class Settings:
     def validate_roles(self) -> None:
         """Enforce the separation CLAUDE.md section 5 requires between roles.
 
-        The attacker must not be the same model family as the agent. If it were,
-        an attack the attacker cannot imagine and a defence the agent cannot
-        resist would share a cause, and a low ASR would be unreadable: we could
-        not tell "the defence held" from "the attacker had the same blind spot
-        as its target".
+        The attacker must not be the same model *family* as the agent. If it
+        were, an attack the attacker cannot imagine and a defence the agent
+        cannot resist would share a cause, and a low ASR would be unreadable: we
+        could not tell "the defence held" from "the attacker had the same blind
+        spot as its target".
+
+        Family rather than provider is the hard requirement because family is
+        what the correlated-failure argument actually rests on (see
+        :func:`infer_family`). Running both roles on one provider is permitted
+        but is weaker separation than CLAUDE.md section 5's ideal, so
+        :meth:`separation_note` reports it and the write-up must state it.
 
         The policy model is the opposite case. Progent's policy generator is
         part of the *system under test*, so it must never be the attacker's
-        model - that would let the attacker's family write the rules it is
+        family - that would let the attacker's own lineage write the rules it is
         being scored against.
         """
+        if self.agent.family == self.attacker.family:
+            raise ValueError(
+                f"Agent ({self.agent}) and attacker ({self.attacker}) are both model family "
+                f"{self.agent.family!r}. CLAUDE.md section 5 requires different model families "
+                "so attacker and agent blind spots cannot be correlated. On Groq, pair e.g. "
+                "llama-3.3-70b-versatile (agent) with openai/gpt-oss-120b or "
+                "moonshotai/kimi-k2-instruct (attacker)."
+            )
+        if self.policy.family == self.attacker.family:
+            raise ValueError(
+                f"Progent's policy model ({self.policy}) is the same family {self.policy.family!r} "
+                f"as the attacker ({self.attacker}). The policy engine is part of the system "
+                "under test and must not run on the attacker's model family."
+            )
+
+    def separation_note(self) -> str:
+        """A one-line description of how well-separated the roles actually are.
+
+        Printed at sweep start and meant to be quoted in the write-up. A run
+        where attacker and agent share a provider is a real caveat on the
+        cross-model claim, and it should be visible in the run log rather than
+        discovered later by reading ``.env``.
+        """
+        parts = [
+            f"agent={self.agent} (family {self.agent.family})",
+            f"attacker={self.attacker} (family {self.attacker.family})",
+            f"policy={self.policy} (family {self.policy.family})",
+        ]
         if self.agent.provider == self.attacker.provider:
-            raise ValueError(
-                f"Agent ({self.agent}) and attacker ({self.attacker}) share provider "
-                f"{self.agent.provider!r}. CLAUDE.md section 5 requires different providers / "
-                "model families so attacker and agent blind spots cannot be correlated."
+            parts.append(
+                f"CAVEAT: agent and attacker share provider {self.agent.provider!r} - "
+                "family-separated but not provider-separated (weaker than CLAUDE.md section 5's ideal)"
             )
-        if self.policy.provider == self.attacker.provider:
-            raise ValueError(
-                f"Progent's policy model ({self.policy}) shares provider {self.policy.provider!r} "
-                f"with the attacker ({self.attacker}). The policy engine is part of the system "
-                "under test and must not run on the attacker's model."
-            )
+        unknown = [s.model for s in (self.agent, self.attacker, self.policy) if not s.family_is_known]
+        if unknown:
+            parts.append(f"NOTE: family could not be inferred for {', '.join(unknown)}")
+        return " | ".join(parts)
 
 
 def bootstrap(

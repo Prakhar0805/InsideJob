@@ -219,6 +219,8 @@ def _run_round(
         strategy=attempt.strategy,
         parent_round=attempt.parent_round,
         injection_preview=attempt.preview(),
+        attacker_generation_failed=attempt.generation_failed,
+        attacker_generation_note=attempt.generation_note,
     )
 
     try:

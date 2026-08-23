@@ -18,16 +18,19 @@ authorized to use* — and is the answer the same across two model families?
 
 ```
 attacker model  ──proposes injection──►  AgentDojo environment
-   (Gemini)                                    │ agent reads injected content
-      ▲                                        ▼
-      │ feedback: blocked / executed /   agent model (Groq)  ──tool call──►  Progent policy check
-      │           in-scope / succeeded         │                                   │ allow / deny
-      └────────────────────────────────────────┴───────────────────────────────────┘
+  (gpt-oss)                                   │ agent reads injected content
+      ▲                                       ▼
+      │ feedback: blocked / executed /   agent model (llama)  ──tool call──►  Progent policy check
+      │           in-scope / succeeded        │                                    │ allow / deny
+      └───────────────────────────────────────┴────────────────────────────────────┘
 ```
 
-- **Agent** and **attacker** are always different providers/families, enforced
+- **Agent** and **attacker** are always different **model families**, enforced
   in `src/config.py` (an attacker blind spot must not be correlated with an
-  agent blind spot).
+  agent blind spot). Family, not provider, is the hard rule — that is what the
+  correlated-failure argument rests on. The project currently runs **Groq-only**,
+  so both roles share a provider; every run prints that caveat, and
+  `experiments/PREREGISTRATION.md` records what it costs the cross-model claim.
 - **Progent** is vendored unmodified and driven only through its public
   `secagent` API (see `VENDOR.md`).
 - **AgentDojo**'s own formal, state-based scoring decides success — no LLM
@@ -62,12 +65,15 @@ python -m venv .venv
 pip install -e ./agentdojo -e ./progent      # vendored forks
 pip install -r requirements.txt
 
-cp .env.example .env                # then fill in GROQ_API_KEY and GEMINI_API_KEY
+cp .env.example .env                # then fill in GROQ_API_KEY
 ```
 
-Both providers are used on their **free tiers only** — the project's cost
+Groq-only for now, so `GROQ_API_KEY` (https://console.groq.com/keys) is the only
+credential needed; the Gemini plumbing stays in place and is re-enabled purely
+by editing `.env`. Everything runs on **free tiers only** — the project's cost
 ceiling is $0 (CLAUDE.md §6). The clients rate-limit and back off rather than
-spend into an overage.
+spend into an overage. Note that with agent, attacker and Progent's policy model
+all on one Groq key, they share a single rate budget (`GROQ_RPM`).
 
 ## Running
 
