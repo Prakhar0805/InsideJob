@@ -40,8 +40,13 @@ EXTRA_MODEL_NAMES: dict[str, str] = {
     "llama-3.1-8b-instant": "AI assistant",
     "openai/gpt-oss-120b": "AI assistant",
     "openai/gpt-oss-20b": "AI assistant",
+    "openai/gpt-oss-safeguard-20b": "AI assistant",
     "moonshotai/kimi-k2-instruct": "AI assistant",
     "qwen/qwen3-32b": "AI assistant",
+    "qwen/qwen3.6-27b": "AI assistant",
+    "allam-2-7b": "AI assistant",
+    "groq/compound": "AI assistant",
+    "groq/compound-mini": "AI assistant",
     "gemini-2.5-flash": "AI model developed by Google",
     "gemini-2.5-flash-lite": "AI model developed by Google",
     "gemini-2.0-flash": "AI model developed by Google",
@@ -49,7 +54,12 @@ EXTRA_MODEL_NAMES: dict[str, str] = {
 
 
 def register_model_names() -> None:
-    """Teach AgentDojo the prose names of the models we add. Idempotent."""
+    """Teach AgentDojo the prose names of the models we add. Idempotent.
+
+    Any model not listed still works: :func:`src.case_runner._agent_prose` falls
+    back to a generic name, which only affects how attack templates address the
+    victim, never scoring.
+    """
     for model, prose in EXTRA_MODEL_NAMES.items():
         MODEL_NAMES.setdefault(model, prose)
 

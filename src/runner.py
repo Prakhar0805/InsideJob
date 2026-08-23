@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     from src.attacker import AdaptiveAttacker
     from src.case_runner import CaseSpec, run_case
     from src.defense import build_defense, install_policy_probe
+    from src.llm_clients import DailyQuotaExhausted
     from src.logging_schema import ResultWriter, completed_keys
 
     suite = get_suites(args.version)[args.suite]
@@ -164,15 +165,28 @@ def main(argv: list[str] | None = None) -> int:
                 defense_state=state,  # type: ignore[arg-type]
                 max_rounds=args.max_rounds,
             )
-            record = run_case(
-                spec,
-                settings=settings,
-                pipeline=pipeline,
-                policy_probe=policy_probe,
-                defense=defense,
-                attacker=attacker,
-                transcript_dir=transcript_dir,
-            )
+            try:
+                record = run_case(
+                    spec,
+                    settings=settings,
+                    pipeline=pipeline,
+                    policy_probe=policy_probe,
+                    defense=defense,
+                    attacker=attacker,
+                    transcript_dir=transcript_dir,
+                )
+            except DailyQuotaExhausted as exc:
+                # A per-day cap will not clear for hours, so grinding against it
+                # wastes the run. Stop cleanly: everything written so far is
+                # durable and a relaunch tomorrow skips completed cases.
+                print(f"\n[insidejob] DAILY QUOTA REACHED - stopping cleanly.\n  {exc}", file=sys.stderr)
+                print(
+                    f"[insidejob] {ran} case(s) completed this session and saved to {out_path}.\n"
+                    f"[insidejob] Re-run the same command tomorrow to continue where it stopped.",
+                    file=sys.stderr,
+                )
+                _print_run_summary(out_path, ran)
+                return 2
             writer.write(record)
             ran += 1
             flag = "HIT" if record.headline_success() else ("esc" if record.attack_succeeded else "---")

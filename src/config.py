@@ -23,10 +23,22 @@ RESULTS_DIR: Final[Path] = REPO_ROOT / "results"
 
 PROVIDERS: Final[tuple[str, ...]] = ("groq", "gemini")
 
-#: Default per-minute request budgets. Deliberately below the published free
-#: tier limits: CLAUDE.md section 6 sets a hard $0 ceiling, so we would rather
-#: sleep than spend the run retrying 429s (or trip a paid overage).
-DEFAULT_RPM: Final[dict[str, int]] = {"groq": 25, "gemini": 8}
+#: Default per-minute budgets, set below the published free-tier limits:
+#: CLAUDE.md section 6 sets a hard $0 ceiling, so we would rather sleep than
+#: spend the run retrying 429s.
+#:
+#: Groq's observed free tier for the models this project can use is 30 req/min
+#: and 8,000 tokens/min. TOKENS are what actually bind: one AgentDojo agent call
+#: carries 1k-4k tokens of tool schema, so 8k TPM permits roughly two to six
+#: calls per minute while 30 RPM would never be reached. Both are metered
+#: per model, so each role gets its own budget.
+DEFAULT_RPM: Final[dict[str, int]] = {"groq": 28, "gemini": 8}
+DEFAULT_TPM: Final[dict[str, int]] = {"groq": 7_000, "gemini": 200_000}
+
+
+def _env_slug(model: str) -> str:
+    """``openai/gpt-oss-120b`` -> ``OPENAI_GPT_OSS_120B`` for env-var lookup."""
+    return "".join(ch if ch.isalnum() else "_" for ch in model).upper()
 
 DEFAULT_BASE_URL: Final[dict[str, str]] = {
     "groq": "https://api.groq.com/openai/v1",
@@ -137,8 +149,26 @@ class ModelSpec:
         return os.getenv(self.base_url_env, "").strip() or DEFAULT_BASE_URL[self.provider]
 
     def rpm(self) -> int:
-        raw = os.getenv(f"{self.provider.upper()}_RPM", "").strip()
-        return int(raw) if raw else DEFAULT_RPM[self.provider]
+        return self._budget("RPM", DEFAULT_RPM[self.provider])
+
+    def tpm(self) -> int:
+        """Tokens-per-minute budget. On real free tiers this, not RPM, binds."""
+        return self._budget("TPM", DEFAULT_TPM[self.provider])
+
+    def _budget(self, kind: str, fallback: int) -> int:
+        """Resolve a rate budget, most specific setting first.
+
+        Per-model override wins because free-tier quotas are metered per model,
+        and a single provider often exposes models with very different caps:
+
+            INSIDEJOB_TPM_OPENAI_GPT_OSS_120B=7500   # this model only
+            GROQ_TPM=7500                            # every Groq model
+        """
+        specific = os.getenv(f"INSIDEJOB_{kind}_{_env_slug(self.model)}", "").strip()
+        if specific:
+            return int(specific)
+        general = os.getenv(f"{self.provider.upper()}_{kind}", "").strip()
+        return int(general) if general else fallback
 
 
 @dataclass(frozen=True)
@@ -151,8 +181,8 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        agent = ModelSpec.parse(os.getenv("INSIDEJOB_AGENT_MODEL", "groq:llama-3.3-70b-versatile"))
-        attacker = ModelSpec.parse(os.getenv("INSIDEJOB_ATTACKER_MODEL", "groq:openai/gpt-oss-120b"))
+        agent = ModelSpec.parse(os.getenv("INSIDEJOB_AGENT_MODEL", "groq:openai/gpt-oss-120b"))
+        attacker = ModelSpec.parse(os.getenv("INSIDEJOB_ATTACKER_MODEL", "groq:qwen/qwen3.6-27b"))
         policy_raw = os.getenv("INSIDEJOB_POLICY_MODEL", "").strip()
         policy = ModelSpec.parse(policy_raw) if policy_raw else agent
         settings = cls(agent=agent, attacker=attacker, policy=policy)
