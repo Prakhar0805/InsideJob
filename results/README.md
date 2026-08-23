@@ -1,6 +1,11 @@
 # Results
 
-Raw JSONL logs and aggregated CSVs land here, one subtree per phase (see
-`src/runner.py: default_out_path`). Raw per-case transcripts and `*.jsonl` are
-gitignored (they are large and regenerable); commit only the aggregated CSVs
-and any summary tables that back the write-up.
+Raw JSONL logs and aggregated CSVs land here, one subtree per phase.
+
+- `gapfuzz audit --json` / `harm --json` write machine-readable differential and
+  reachable-harm results here.
+- `policy_corpus/` holds cached LLM-generated policies (Phase C) so the harm
+  sweep can be re-run without re-spending budget.
+
+Large raw dumps and `*.jsonl` are gitignored; commit the aggregated JSON/CSV and
+any summary tables that back the write-up.
