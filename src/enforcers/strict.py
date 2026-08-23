@@ -245,17 +245,26 @@ class StrictEnforcer:
         return True, f"{arg_name}: satisfies schema"
 
 
-_REGEX_METACHARS = set(r"^$*+?{}[]\|()")
+#: Markers of *deliberate* regex structure. A lone `.`, `?`, or `+` inside prose
+#: (e.g. "...in DM?") is almost never regex intent — treating it as one is the
+#: A2 trap in reverse. Anchors, character classes, groups, and escape sequences
+#: are strong signals the author meant a pattern.
+_REGEX_STRUCTURE = (
+    "[", "]", "(", ")", "^", "$", "|",
+    r"\d", r"\w", r"\s", r"\b", r"\.", r"\A", r"\Z",
+    ".*", ".+", "\\",
+)
 
 
 def _looks_like_regex(pattern: str) -> bool:
-    """Heuristic: does this restriction read as a pattern or as a literal?
+    """Does this restriction carry deliberate regex structure, or is it a literal?
 
-    Only used when fixing A2. A lone `.` does not count — an email address or a
-    hostname contains dots and is almost never meant as a wildcard, which is
-    exactly the trap A2 describes.
+    Used to decide whether to treat a restriction as a pattern or an exact value
+    (gap A2). Conservative on purpose: prose containing an incidental `?` or `.`
+    is a literal, so it is matched and hardened as one, while anything with
+    anchors, classes, groups, or escapes is kept as a genuine pattern.
     """
-    return any(ch in _REGEX_METACHARS for ch in pattern)
+    return any(marker in pattern for marker in _REGEX_STRUCTURE)
 
 
 def _anchor(pattern: str) -> str:
