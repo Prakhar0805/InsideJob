@@ -1,0 +1,39 @@
+{
+  "enforcer": "janus",
+  "styles": {
+    "pattern-pinned": {
+      "fragments": 95,
+      "bypassable_fragments": 95,
+      "bypass_rate": 1.0,
+      "gap_counts": {
+        "A1_unanchored": 190
+      }
+    },
+    "pattern-no-type": {
+      "fragments": 95,
+      "bypassable_fragments": 95,
+      "bypass_rate": 1.0,
+      "gap_counts": {
+        "A1_unanchored": 190,
+        "A3_type_scoped_noop": 95
+      }
+    },
+    "format-only": {
+      "fragments": 95,
+      "bypassable_fragments": 95,
+      "bypass_rate": 1.0,
+      "gap_counts": {
+        "A4_format_unenforced": 285
+      }
+    },
+    "enum-exact": {
+      "fragments": 95,
+      "bypassable_fragments": 0,
+      "bypass_rate": 0.0,
+      "gap_counts": {}
+    }
+  },
+  "total_instances": 760,
+  "invariant_violations": 0,
+  "instances": "omitted (use --full)"
+}

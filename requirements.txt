@@ -14,3 +14,11 @@ tenacity>=8.2.3         # retry/backoff on free-tier throttling
 pydantic>=2.7.1
 pandas>=2.2.0           # results aggregation
 pytest>=8.0.0
+
+# Cross-engine generalization check (Phase D). The second, independently-built
+# policy engine under test. Optional: the core suite runs without it (its tests
+# skip if absent). Pinned because the differential result is version-specific.
+# NOTE: janus-guard pins openai<2, which downgrades the openai package; this is
+# harmless here (our clients only use the chat.completions path) but explains
+# the version you'll see after installing it.
+janus-guard==0.0.5
