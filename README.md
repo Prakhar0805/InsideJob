@@ -1,123 +1,67 @@
-# InsideJob
+# InsideJob — Paper Guardrails
 
-**Adaptive red-teaming of a deterministic agent defense (Progent), using only
-authorized-action attacks — zero GPU, zero fine-tuning, API-only.**
+**"Deterministic" LLM-agent guardrails are audited on whether the *agent* can be fooled. That's the wrong test. We audit what the *enforcer admits* — and the admitted set is systematically larger than the policy appears to describe. The core result runs in seconds, with no GPU, no model, and no API key.**
 
-This is the implementation. The standing research spec — questions, scope
-boundaries, pre-registered success criteria — lives in [`CLAUDE.md`](CLAUDE.md)
-and governs everything here.
+---
 
-## The question, in one line
+## The one-paragraph version
 
-Does Progent's deterministic policy check still hold when the attacker *adapts
-over many rounds*, against a *real frontier model over an API*, across
-*AgentDojo's full suite*, while staying inside the tools the agent is *already
-authorized to use* — and is the answer the same across two model families?
+Progent (UC Berkeley), Janus, and the whole "policy-as-code for agents" family share a design: **an LLM writes a least-privilege policy, and deterministic code enforces it** on every tool call. The pitch is "the enforcer is code, so it can't be prompt-injected." But that guards the wrong boundary. The policy *describes* an intended set of allowed argument values; the matcher *admits* a different, larger set. That gap is a **parser differential** — the same bug class behind CouchDB CVE-2017-12635 and the GitLab SAML 2025 auth bypass — and nobody had pointed it at agent guardrails. We characterize it, prove it reaches real harm on AgentDojo's own tasks, show it holds across two independently-built engines, and ship a linter that closes the part a policy rewrite can reach.
 
-## How the pieces fit
+## What we found (all reproducible offline)
 
+- **The matcher admits a strict superset of the policy.** Across 95 policy fragments per suite, every flawed-but-natural policy idiom is **100% bypassable**; the one sound idiom (an exact `enum`) is **0%**. 760 labelled gap instances.
+- **`pattern` is unanchored** (`re.search`): `pattern:"GB29NWBK…"` also admits `GB29NWBK…-ATTACKER`. Progent's bare-string branch uses `re.match` — prefix-only.
+- **Schema keywords are silently ignored off-type**: `{"type":"array","pattern":"^emma@corp.com$"}` enforces *nothing* — and Progent's own prompt warns the LLM about this, which means they know the model gets it wrong.
+- **`format` is recommended to the policy LLM and never enforced.** **Deny rules fail open** — any error evaluating a forbid rule deletes it. **"Default deny" isn't even a construct** — it's governed by the last rule's fallback field.
+- **The engine leaks its own boundary**: every denial hands the agent the exact allowed-value set (`'DE89…' is not one of ['GB29…']`).
+- **Validated harm, not just theory.** An admitted call only counts when AgentDojo's own state-based `security()` predicate confirms it achieves the attacker's objective. The oracle is calibrated on all 25/25 injection tasks.
+- **A fix, with its cost measured for free.** The taxonomy splits: **A1–A4 close by rewriting the policy alone — 100% of legitimate tasks preserved.** A5 and the control-flow gaps are matcher behaviors that need the engine to adopt strict semantics; closing A5 by denying unnamed arguments costs ~12% utility. Every number is computed with zero API calls.
+
+## Reproduce it in seconds
+
+```bash
+python -m venv .venv && . .venv/Scripts/activate     # ../bin/activate on POSIX
+pip install -e ./agentdojo -e ./progent && pip install -r requirements.txt
+
+python -m gapfuzz audit --enforcer progent           # the differential result
+python -m gapfuzz audit --enforcer strict            # self-consistency: 0 gaps
+python -m gapfuzz harm  --enforcer progent           # reachable-harm sweep
+python -m pytest                                     # 106 tests; the taxonomy is pinned here
 ```
-attacker model  ──proposes injection──►  AgentDojo environment
-  (gpt-oss)                                   │ agent reads injected content
-      ▲                                       ▼
-      │ feedback: blocked / executed /   agent model (llama)  ──tool call──►  Progent policy check
-      │           in-scope / succeeded        │                                    │ allow / deny
-      └───────────────────────────────────────┴────────────────────────────────────┘
-```
 
-- **Agent** and **attacker** are always different **model families**, enforced
-  in `src/config.py` (an attacker blind spot must not be correlated with an
-  agent blind spot). Family, not provider, is the hard rule — that is what the
-  correlated-failure argument rests on. The project currently runs **Groq-only**,
-  so both roles share a provider; every run prints that caveat, and
-  `experiments/PREREGISTRATION.md` records what it costs the cross-model claim.
-- **Progent** is vendored unmodified and driven only through its public
-  `secagent` API (see `VENDOR.md`).
-- **AgentDojo**'s own formal, state-based scoring decides success — no LLM
-  judge.
-- Every successful attack is scope-checked (`src/scope_check.py`): only
-  *authorized-action* successes count toward the headline number; policy-escape
-  successes are logged and reported separately.
+No `.env`, no API key, no cost. Every gap in `tests/test_enforcement_gaps.py` is written as *"the real engine allows X, a sound matcher denies X"* — so the day one starts failing is the day the gap was fixed upstream.
 
-## Layout
+## How it's built
 
 | Path | What |
 |---|---|
-| `src/config.py` | model specs, credentials, role separation, Progent bootstrap |
-| `src/llm_clients.py` | Groq/Gemini OpenAI-compatible clients, rate limiting, backoff |
-| `src/agent.py` | AgentDojo pipeline backed by a free-tier model; run recorder |
-| `src/defense.py` | swappable defence adapters (`none`, `progent`) |
-| `src/attacker.py` | evolutionary black-box attacker (generate → test → mutate) |
-| `src/scope_check.py` | authorized-action boundary check (the validity core) |
-| `src/case_runner.py` | the adaptive loop for one case |
-| `src/runner.py` | one suite × one condition per process (CLI) |
-| `src/orchestrate.py` | fan a phase out across suites, then summarise |
-| `src/aggregate.py` | ASR-with-utility, per-domain, per-model reporting |
-| `src/logging_schema.py` | the CLAUDE.md §9 result record + JSONL I/O |
-| `experiments/` | per-phase runbooks + the locked pre-registration |
-| `agentdojo/`, `progent/` | vendored upstream, unmodified (see `VENDOR.md`) |
+| `src/enforcers/base.py` | the `EnforcerAdapter` protocol + the `GapClass` taxonomy (A1–A5, B1–B5) |
+| `src/enforcers/strict.py` | the sound reference matcher, parameterized by which gaps it fixes (so each disagreement attributes to one class) |
+| `src/enforcers/progent.py` | adapter over the real `secagent` engine, unmodified |
+| `src/enforcers/janus.py` | adapter over `janus-guard` — the cross-engine check |
+| `src/gapfuzz/` | mutation operators, the bypass search, and the two sweeps; `python -m gapfuzz` |
+| `src/harm_oracle.py` | zero-LLM oracle over AgentDojo's own `security()` state predicates |
+| `src/policy_lint.py` | detect + repair gaps; splits policy-fixable (A1–A4) from engine-level (A5, B*) |
+| `src/utility_cost.py` | free false-positive measurement of the hardening |
+| `agentdojo/`, `progent/` | vendored upstream, **unmodified** (see `VENDOR.md`) |
 
-## Setup
+The design rule that makes the cross-engine claim cheap: **`gapfuzz` never imports `secagent` or `janus`** — everything engine-specific is behind `EnforcerAdapter`. Swapping the engine under test is a one-line change.
 
-```bash
-python -m venv .venv
-. .venv/Scripts/activate            # Windows;  ../bin/activate on POSIX
-pip install -e ./agentdojo -e ./progent      # vendored forks
-pip install -r requirements.txt
+## What a reported bypass has to clear
 
-cp .env.example .env                # then fill in GROQ_API_KEY
-```
+Three gates, never fewer:
 
-Groq-only for now, so `GROQ_API_KEY` (https://console.groq.com/keys) is the only
-credential needed; the Gemini plumbing stays in place and is re-enabled purely
-by editing `.env`. Everything runs on **free tiers only** — the project's cost
-ceiling is $0 (CLAUDE.md §6). The clients rate-limit and back off rather than
-spend into an overage. Note that with agent, attacker and Progent's policy model
-all on one Groq key, they share a single rate budget (`GROQ_RPM`).
+1. **Admitted** by the real engine's matcher.
+2. **Rejected** by the strict reference (else it's a too-broad policy, not an enforcement gap).
+3. **Harmful** — AgentDojo's `security()` predicate confirms the call achieves the injection task's objective in a freshly-executed sandbox.
 
-## Running
+And a global invariant, asserted in every run: the strict reference never admits what the engine denies. If it did, the reference would be wrong — so this guards the validity of every number.
 
-```bash
-# Smoke test (a few cases, no cost worries):
-python -m src.runner --suite banking --defense progent --attack adaptive \
-    --limit 2 --injection-limit 1 --max-rounds 4 --verbose
+## Honest scope
 
-# Phase 1 baselines (undefended + Progent-static), all suites:
-python -m src.orchestrate --phase 1
+This characterizes **one** enforcement-layer weakness and fixes part of it. It does not "solve" prompt injection. The reachable-harm rate on *LLM-generated* (rather than constructed) policies is the one measurement that costs a little API budget — it is built, cached, and resumable, and is the only step that needs a key. The systems under test are real open-source projects; **maintainers are notified before publication** (see `CLAUDE.md` §11).
 
-# Phase 2 adaptive sweep (ONLY after PREREGISTRATION.md is locked):
-python -m src.orchestrate --phase 2 --max-rounds 8 --transcripts \
-    --summary-csv results/phase2_adaptive/summary.csv
+## Origins
 
-# Summarise anything:
-python -m src.aggregate "results/**/*.jsonl"
-```
-
-See `experiments/*/README.md` for the full runbook per phase and
-`experiments/PREREGISTRATION.md` for the success criteria that must be locked
-before Phase 2.
-
-## Swapping in a different defence (a project deliverable)
-
-The attacker, runner, and scope check never import `secagent` directly — they
-talk to `src/defense.py`'s `DefenseAdapter` protocol. To evaluate a different
-AgentDojo-wrapped defence, implement the five protocol methods and register the
-class in `DEFENSES`; nothing in the attack loop changes (CLAUDE.md §3, §11).
-
-## Tests
-
-```bash
-python -m pytest -q
-```
-
-Covers the logic the research validity depends on: scope-checking, result
-aggregation and the §9/§10 reporting rules, role separation, the result schema,
-the attacker's parsing/seeding/fallback, and one offline end-to-end pass through
-the real AgentDojo banking suite (no API, no cost).
-
-## What this project does not do
-
-Out of scope by CLAUDE.md §4 and not implemented here: white-box/gradient
-attacks, self-hosting or fine-tuning any model, designing a new defence,
-data-leak/secret-extraction attacks, and any comparison of our ASR directly
-against another paper's number on a different model (§10).
+This began as an adaptive-attack study against Progent; that brief is preserved in `CLAUDE.old.md`. It was abandoned because it needed a full agent rollout per data point — months of free-tier budget for an underpowered result. Auditing the matcher instead answers the same question ("does the defense actually hold?") more sharply, for free.

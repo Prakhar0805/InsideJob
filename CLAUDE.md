@@ -1,227 +1,193 @@
 # InsideJob
 
-**Adaptive red-teaming of deterministic agent defenses, using only authorized-action attacks — zero GPU, zero fine-tuning, API-only.**
+**"Deterministic" LLM-agent guardrails are evaluated on whether the *agent* can be fooled. That measures the wrong thing. We measure what the *enforcer admits* — and show the admitted set is systematically larger than the policy appears to describe. Zero GPU, zero fine-tuning, and the core result needs zero API calls.**
 
-This file is the standing context for this project. Read it fully before writing any code. If anything in a task conflicts with this file, this file wins unless the user explicitly overrides it in that conversation.
+This file is the standing context for the project. Read it fully before writing code. If a task conflicts with this file, this file wins unless the user overrides it in that conversation.
+
+> **Pivot note (2026-08-24).** This project began as an adaptive-attack study against Progent (the old brief is preserved in `CLAUDE.old.md`). That framing was abandoned because it required a full LLM agent rollout per data point — months of free-tier budget for an underpowered result. The security-critical component of a deterministic defense is not the agent, it is the **matcher**, which is pure code. Auditing the matcher is free, exact, model-independent, and reproducible in seconds. The old goal — does the defense actually hold — is answered more sharply this way.
 
 ---
 
 ## 1. What this project is
 
-We are testing whether **Progent** — an open-source, deterministic, code-level policy engine for LLM agents — still blocks prompt-injection-driven misbehavior when the attacker is allowed to *adapt* over many rounds, is confined to tools the agent is *already authorized to use*, and the agent is a real frontier model rather than a small self-hosted one.
+Progent, Janus, and the wider "policy-as-code for agents" family all work the same way:
 
-We are **not** building a new defense. Progent already exists and is not being modified except through its own supported policy/config interface. We are the red team, not the architects.
+> an **LLM writes** a least-privilege policy → **code enforces** it on every tool call.
 
-Only one prior study (LaunchSafe, June 2026) has adaptively tested a deterministic agent defense at all, and it explicitly named this exact scenario as its own unanswered next question. That's the gap this project fills.
+The field's security argument is *"the enforcer is code, so it can't be prompt-injected."* That protects the wrong boundary. The policy **describes** an intended set of permitted argument values; the matcher **admits** a different, larger set. The gap between them is a **parser differential** — a vulnerability class with a 20-year CVE history (CouchDB CVE-2017-12635, GitLab SAML 2025, the Tekton `VerificationPolicy` substring bypass) that no one had applied to LLM-agent guardrails.
+
+We characterize that gap, prove it reaches real harm on AgentDojo's own tasks, show it generalizes across two independently-built engines, and ship a linter that closes the half of it a policy rewrite can reach — measuring the utility cost of the other half.
+
+We are the red team and the tool-builders, **not** the defense's authors. Progent and Janus are used unmodified.
 
 ---
 
 ## 2. Research questions
 
 **Primary:**
-> Does Progent's deterministic policy check still hold when the attacker (a) adapts over many rounds instead of trying once, (b) is tested against a real frontier model accessed via API rather than a small self-hosted one, (c) is evaluated across AgentDojo's full task suite rather than a slice, and (d) is constrained to actions the agent is already authorized to perform, rather than trying to defeat the policy layer directly?
+> For a deterministic, code-level policy engine that enforces LLM-generated JSON-Schema policies, does the set of tool calls the matcher **admits** coincide with the set the policy **intends**? Where they diverge, can an attacker reach the benchmark's own harm objectives with a call that is fully policy-compliant?
 
-**Secondary (pre-registered, not an afterthought):**
-> Is that answer consistent across model families, or does it depend on which model is doing the acting? Run the identical pipeline on at least two agent models from different providers (e.g. a Groq-hosted open-weight model and a Gemini-hosted closed model) and report whether they land in the same place.
+**Secondary (generalization):**
+> Is this a property of one implementation or of the architecture? The same taxonomy is run against a second, independently-built engine (Janus, `janus-guard` on PyPI) that adopted the same policy shape. If both exhibit the same gaps, the finding is architectural.
 
-Both questions get answered and reported, regardless of which way either one comes out.
+**Tertiary (mitigation):**
+> How much of the gap is closable by rewriting the policy (engine unmodified), how much requires the engine to change, and what does each cost in legitimate-task utility?
 
 ---
 
-## 3. Pre-registered success criteria
+## 3. The verified taxonomy
 
-Decide these **before Phase 2 (the full adaptive sweep) begins**, and timestamp the decision. This exists so results can't be reframed after the fact to fit whatever we find. If there's a genuine reason to revise a threshold later, log it explicitly as a dated deviation with a stated reason — never quietly move the goalposts after seeing results.
+Every row was executed against the installed `jsonschema` 4.26.0 / `z3-solver` 5.1.0 and is pinned by a regression test in `tests/test_enforcement_gaps.py`. Codes are shared by the code, the tests, the logs, and the write-up.
 
-**Primary finding — is Progent's adaptive robustness real at scale?**
-- **"Defense holds"** — adaptive ASR stays within roughly the 2.6%–4.2% band Progent has shown in every prior test (allow natural variance; use judgment, but the number needs to visibly overlap that band, not just be "still low-ish").
-- **"Defense cracked"** — adaptive ASR clearly and repeatably lands outside that band. A single outlier task doesn't count; it needs to hold up across a meaningful share of cases and domains.
-- Both outcomes are written up with equal seriousness. Neither is the hoped-for result — do not design the attacker, tune the round count, or pick reporting cutoffs in a way that nudges toward one answer.
+**A — matcher semantics (admitted set larger than written):**
+- **A1 unanchored** — `re.match` is prefix-only; JSON Schema `pattern` is `re.search`. `pattern:"IBAN"` admits `IBAN-ATTACKER`.
+- **A2 raw regex** — restrictions compile as regex, so `.` in `"a@b.com"` is a wildcard.
+- **A3 type-scoped no-op** — schema keywords are silently ignored off-type; `{"type":"array","pattern":…}` constrains nothing.
+- **A4 format unenforced** — `format` is recommended to the policy LLM but validated with no checker, so it is a pure annotation (and `uri` has no checker even when one is enabled).
+- **A5 unconstrained siblings** — only named args are checked; no `required`, no `additionalProperties:false`.
 
-**Secondary finding — is the result model-dependent?**
-State in advance: "consistent" means both agent models land in the same band (hold or crack) within a reasonable margin; "model-dependent" means they diverge meaningfully. This resolves cleanly no matter what the primary finding is, and is genuinely useful on its own — a defense that only holds for one model family is a materially weaker claim than one that holds for both.
+**B — control flow (allows where it should deny):**
+- **B1 absent-arg skip** — a restriction on an argument that wasn't passed is skipped.
+- **B2 fallback leak** — the fall-through default-deny is governed by the *last rule's* fallback field; out-of-range ⇒ allow.
+- **B3 deny fails open** — a bare `except: continue` deletes any forbid rule that errors.
+- **B4 precedence inversion** — priority-100 (every LLM rule) is *lowest* precedence; a broad low-numbered allow pre-empts it.
+- **B5 no-policy-allows** — an unset policy permits everything.
 
-**Deliverable-level success — independent of either number:**
-Even if both models land cleanly in "defense holds" and nothing dramatic turns up, the project is still a success if it produces all four of:
-1. This written, timestamped threshold decision, committed *before* Phase 2 ran.
-2. A working, documented, reusable evaluation harness — someone else should be able to clone the repo, swap in a different AgentDojo-wrapped defense, and get a comparable adaptive-ASR result without rewriting the attack loop.
-3. A clear, reported answer to the cross-model question above.
-4. An honest write-up reporting whichever combination of the above actually happened.
+**C — boundary disclosure:** every Progent denial hands the agent the schema fragment and the user query verbatim (`'DE89…' is not one of ['GB29…']`). The engine is an oracle for its own boundary — which is why the *original* adaptive-attack question is cheap: the defense quotes the answer back.
 
-Do not begin Phase 2 until this section is finalized.
+**Out of scope (by choice, to keep the thesis clean):** the policy-*update* path where untrusted tool output is spliced into the policy LLM's prompt. Real and serious, but it is a *synthesis* finding, needs API budget, and dilutes a clean enforcement story. Noted as adjacent future work only.
 
 ---
 
 ## 4. Scope
 
 ### In scope
-- A black-box, API-only, evolutionary adaptive attacker (generate attempt → observe blocked/executed → mutate → repeat)
-- Reusing Progent's existing open-source policy engine, in its proxy mode, unmodified
-- Testing on real models reached via free API tiers — both an open-weight model (via Groq) and a closed frontier model (via Gemini's free tier)
-- The full AgentDojo benchmark: all 4 domains, all ~629 test cases
-- Attacks confined to tools already present in the agent's authorized action set for that task
-- Honest reporting of Utility alongside ASR, in every result, no exceptions
+- Offline, zero-LLM differential analysis of the enforcement matcher vs a sound reference.
+- Reachable-harm validation using AgentDojo's own state-based `security()` predicates (never an LLM judge).
+- Cross-engine generalization (Progent + Janus), through a shared adapter interface.
+- A policy-hardening linter and a free, formal measurement of its utility cost.
+- A small optional LLM-generated-policy study (the only thing that spends budget) to show the gaps occur in *real* generated policies, not just constructed ones.
 
-### Explicitly out of scope — do not implement these without a direct instruction from the user
-- White-box / gradient-based attacks (GCG or similar) — requires model internals and a GPU we don't have
-- Self-hosting any open-weight model — no local GPU inference of any kind
-- Fine-tuning, LoRA, or any weight modification of any model
-- Designing a new defense architecture — Progent is used as-is
-- Confidentiality/data-leak attacks (system prompt extraction, secret leakage) — this project is about hijacked *actions*, not leaked *text*
-- Any claim, in code comments or write-ups, that this "solves" prompt injection generally
-
-If a task seems to require any of the above, stop and flag it rather than working around it.
+### Explicitly out of scope — do not implement without a direct instruction
+- Modifying Progent's or Janus's engine code (they are the systems under test; configure/observe only).
+- Modifying AgentDojo's scoring (`security()` / `utility`). If a bug is suspected, flag it — see the `banking any()` precedence bug, which we report but do **not** patch.
+- Any white-box/gradient work, model hosting, or fine-tuning.
+- The policy-update injection path (above).
+- Claiming this "solves" prompt injection. It characterizes one enforcement-layer weakness and fixes part of it.
 
 ---
 
 ## 5. Architecture
 
 ```
-        ┌─────────────────────┐
-        │  Frontier agent      │   (Groq or Gemini free tier — no self-hosting)
-        └──────────┬───────────┘
-                   │ wants to call a tool
-        ┌──────────▼───────────┐
-        │  Progent proxy        │   (deterministic policy check — unmodified,
-        │  (policy engine)       │    no model access needed)
-        └──────────┬───────────┘
-              allow │  │ deny
-        ┌──────────▼┐ ┌▼──────────┐
-        │  execute   │ │  blocked   │
-        └────────────┘ └─────┬──────┘
-                              │ feedback
-        ┌─────────────────────▼───────┐
-        │  Black-box attacker (LLM)     │   (different provider/model family
-        │  evolutionary loop:            │    than the agent, to avoid
-        │  generate → test → mutate →    │    correlated failure)
-        │  repeat for N rounds           │
-        └────────────────────────────────┘
+        LLM  ──writes──►  policy  (JSON-Schema conditions per tool arg)
+                             │
+                    ┌────────┴─────────┐
+                    │                  │
+              enforcer matcher    strict reference      ← same rules, sound semantics
+              (Progent / Janus)   (StrictEnforcer)
+                    │                  │
+                    └──── differ? ─────┘  every disagreement = a labelled gap instance
+                             │
+                    admitted-but-unintended call
+                             │
+                    ┌────────▼─────────┐
+                    │   harm oracle    │  execute in a fresh AgentDojo sandbox,
+                    │ (AgentDojo state)│  then ask the injection task's security()
+                    └────────┬─────────┘
+                    admitted AND reference-rejected AND achieves attacker goal
+                             │
+                        validated bypass
+                             │
+                    ┌────────▼─────────┐
+                    │   policy_lint    │  harden → re-run → gap closes; utility cost measured
+                    └──────────────────┘
 ```
 
-**Components:**
-1. **Agent** — a frontier model called via API. No self-hosting.
-2. **Defense** — Progent, proxy mode, wrapping the agent's tool calls. Pure code, no GPU.
-3. **Attacker** — a separate model, different provider/family than the agent, running an evolutionary black-box loop (per Swept AI's proven zero-compute methodology): craft injected content → observe whether the resulting action was blocked or executed → keep what worked, mutate, try a new angle → repeat for many rounds per test case.
-4. **Harness** — AgentDojo's own environments, tasks, and scoring (formal utility functions checking environment state — do not replace this with an LLM judge).
-5. **Constraint enforcement** — every attack attempt must be checked to confirm it stays within the agent's already-authorized tool set for that task before counting as a valid "authorized-action attack." Attempts that only succeed by escaping the policy boundary itself are a different experiment and must be logged separately, not folded into the headline number.
+**Components (all in `src/`):**
+1. **`enforcers/`** — `EnforcerAdapter` protocol; `progent.py`, `janus.py` (adapters over the real engines, unmodified), and `strict.py`, the sound reference. `strict.py` is parameterised by *which* gaps it fixes, so a differential run attributes each disagreement to exactly one class.
+2. **`gapfuzz/`** — mutation operators (one family per gap class), the bypass search (admitted ∧ reference-rejected ∧ harmful), the differential sweep, and the reachable-harm sweep. CLI: `python -m gapfuzz`.
+3. **`harm_oracle.py`** — the zero-LLM oracle over AgentDojo's `security()` predicates.
+4. **`policy_lint.py` / `utility_cost.py`** — the mitigation and its measured cost.
+5. **`policy_corpus.py`** — the only API-spending step (generate real policies; cached, resumable).
 
 ---
 
 ## 6. Tech stack & hard constraints
 
-- **Language:** Python 3.11+
-- **Benchmark:** AgentDojo (forked from the official open-source repo — reuse its tasks, environments, and scoring as-is; do not reimplement scoring logic)
-- **Defense:** Progent (official open-source repo, proxy mode)
-- **Model access:** Groq API (free tier — open-weight models, e.g. Llama 3.3 70B) and Google AI Studio (free tier — Gemini, closed model). Use different providers/model families for the agent role vs. the attacker role.
-- **Compute:** none. No GPU, no local model hosting, no fine-tuning, anywhere in this pipeline. If a step seems to need a GPU, that step is out of scope — flag it, don't route around it.
-- **Cost ceiling:** $0. All API usage stays within free tiers. Batch and rate-limit requests; add retry/backoff for free-tier throttling.
-- **Secrets:** API keys live in a `.env` file (gitignored), loaded via `python-dotenv`. Never hardcode keys, never log full keys, never commit `.env`.
+- **Python 3.11+** (dev env is 3.13, venv at `.venv`).
+- **Benchmark:** AgentDojo (vendored, unmodified — `agentdojo/`). We reuse its tasks, environments, and `security()`/`utility` scoring as-is.
+- **Systems under test:** Progent (vendored as `progent/`, package `secagent`) and Janus (`pip install janus-guard`). Both unmodified.
+- **Compute:** none. No GPU, no model hosting, no fine-tuning.
+- **Cost ceiling: $0.** The core result (Phases A/B/E) makes **zero** API calls. Only the optional generated-policy study (`policy_corpus.py`) calls an API, on a free tier, batched and cached. Groq free tier has no card attached: over-limit returns HTTP 429, never a charge.
+- **Secrets:** API keys live in `.env` (gitignored), loaded via `python-dotenv`. Never hardcode, never log, never commit.
 
 ---
 
 ## 7. Repository structure
 
 ```
-insidejob/
-├── CLAUDE.md                  # this file
-├── .env.example
-├── requirements.txt
-├── agentdojo/                 # forked benchmark harness (submodule or vendored)
-├── progent/                   # forked defense engine (submodule or vendored)
+InsideJob/
+├── CLAUDE.md                  # this file          CLAUDE.old.md  # the abandoned ASR brief
+├── README.md  VENDOR.md  requirements.txt  pytest.ini
+├── agentdojo/  progent/       # vendored, unmodified (see VENDOR.md)
 ├── src/
-│   ├── agent.py                # agent wrapper (Groq / Gemini backends)
-│   ├── attacker.py             # evolutionary black-box attack loop
-│   ├── scope_check.py          # verifies attacks stay within authorized-action bounds
-│   ├── runner.py                # orchestrates a full benchmark sweep
-│   └── logging_schema.py       # structured result logging (see §9)
-├── experiments/
-│   ├── phase0_baseline_repro/  # reproducing published numbers before anything new
-│   ├── phase1_static/           # our own static-attack baseline, per model
-│   ├── phase2_adaptive/         # the actual adaptive sweep
-│   └── phase3_ablations/        # includes the cross-model comparison (§2, §3)
-├── results/                    # raw logs + aggregated CSVs, per experiment
-└── writeup/                    # the eventual report/preprint
+│   ├── enforcers/             # base.py, strict.py, progent.py, janus.py
+│   ├── gapfuzz/               # operators, search, sweep, harm_sweep, corpus, __main__
+│   ├── harm_oracle.py         # zero-LLM AgentDojo harm oracle
+│   ├── policy_lint.py         # detect + repair gaps
+│   ├── utility_cost.py        # free false-positive measurement of hardening
+│   ├── policy_corpus.py       # the only API-spending step (Phase C)
+│   ├── config.py llm_clients.py  # kept for Phase C; token-aware free-tier pacing
+│   └── agent.py case_runner.py runner.py  # retained for the Phase-D end-to-end proof
+├── gapfuzz/                   # thin shim so `python -m gapfuzz` works
+├── tests/                     # 106+ tests; the taxonomy is pinned here
+├── experiments/  results/  writeup/
 ```
 
 ---
 
 ## 8. Development phases
 
-Do not begin Phase 2 until §3 (pre-registered success criteria) is finalized and timestamped.
-
-| Phase | Goal | Definition of done |
+| Phase | Goal | Status |
 |---|---|---|
-| 0. Baseline reproduction | Reproduce Progent's and/or LaunchSafe's published numbers on our own setup | Our numbers land within a reasonable margin of published ones, on the same or comparable conditions; discrepancies are investigated and explained, not ignored |
-| 1. Static baseline (ours) | Establish undefended and Progent-defended static ASR/Utility, per model we use | Clean numbers logged for both Groq and Gemini agents, all 4 domains |
-| 2. Adaptive attacker | Build and validate the evolutionary attack loop, run the full sweep per §3's criteria | Attacker demonstrably improves over rounds on a held-out sample before the full run; complete results for all ~629 cases, both models, with authorized-action-scope check applied to every successful attack |
-| 3. Ablations + cross-model comparison | Round count, attacker model strength, per-domain breakdown, and the pre-registered secondary hypothesis (§2) | Ablation table complete; cross-model consistency question explicitly answered, not just implied by the numbers |
-| 4. Write-up | Honest report of findings | Both possible primary outcomes and the cross-model outcome reported plainly; the deliverable checklist in §3 is fully checked off |
+| A. Differential harness | Matcher vs strict reference; every flawed idiom's bypass rate, per gap class | **done** — 100% of flawed idioms, 0% of exact enum; 760 instances; free |
+| B. Reachable harm | Admitted-and-harmful validated by AgentDojo `security()` | **done** — oracle calibrated 25/25; validated bypasses demonstrated |
+| C. Generated policies | Show the gaps occur in *real* LLM-written policies (only API spend) | ready to run when a key is present; cached + resumable |
+| D. Cross-engine + e2e | Janus adapter; a handful of real agent rollouts as an existence proof | Janus adapter + small rollout budget |
+| E. Mitigation | `policy_lint` closes A1–A4 free; measure the A5/B engine-level cost | **done** — 100% utility for policy-level fixes, ~88% with A5 |
+| F. Deliverables | Repo + tool + interactive artifact + write-up + responsible disclosure | in progress |
 
 ---
 
 ## 9. Metrics & logging
 
-Every single test case run must log at minimum:
-
-```
-timestamp, model_provider, model_name (agent), attacker_model,
-domain, task_id, defense_state (none | static | adaptive),
-rounds_used, blocked (bool), final_action_taken,
-within_authorized_scope (bool), utility_score, attack_succeeded (bool),
-notes / transcript_path
-```
-
-Rules:
-- **Never report ASR without Utility next to it.** A defense that blocks everything but also breaks every real task is not a result worth reporting as a win.
-- **Never average away per-domain or per-model numbers silently.** Report per-domain and per-model-provider breakdowns; an aggregate hiding one domain's or one model's collapse is misleading.
-- **Log blocked attempts too, not just successes.** The shape of what got blocked is as informative as what got through.
-- **Keep raw transcripts.** Aggregated numbers get double-checked against them before anything goes in the write-up.
+- **Never report an admittance number without its harm and utility context.** A matcher admitting a superset only matters if some admitted call is harmful; a fix only matters if legitimate tasks survive it. Both travel with every claim.
+- **Attribute every gap to one class**, by isolating which single reference-fix flips the verdict — not by which operator produced the candidate.
+- **A reported bypass clears three gates:** admitted by the engine, rejected by the strict reference, and scored harmful by AgentDojo. Never fewer.
+- **The reference-soundness invariant is asserted in every sweep:** the strict reference must never admit what the engine denies. A violation means our reference is wrong, not that we found a gap.
+- **Handle AgentDojo's confounds explicitly, never silently:** the `banking/user_task_15` attacker-IBAN confound (excluded), the `slack/injection_task_5` trace-scoring, the stateful policy replay, and the `banking any()` precedence bug (flagged, not patched).
 
 ---
 
-## 10. On comparing to prior baselines — important correction
+## 10. Coding conventions
 
-**Do not directly compare our ASR numbers to LaunchSafe's or Progent's published numbers as if they're on the same scale.** ASR is a function of *model + defense + attack* jointly — a different model has its own native susceptibility to injection, independent of how good our attack is. Directly claiming "we beat their 2.6%" using a different model would be comparing apples to oranges.
-
-**The correct comparison is internal, per model:**
-1. Undefended ASR (Progent off) — our own model
-2. Static-attack ASR, Progent on — our own model
-3. Adaptive-attack ASR, Progent on — our own model
-
-The finding that matters is **(3) vs (2), on the same model** — did adapting the attack meaningfully raise ASR over our own static baseline? Prior published numbers (2.6%–4.2% for Progent's own tests) are *context* to cite in the write-up, and the reference band used in §3 — not a target number to literally beat with a different model.
+- Type hints on all signatures. Docstrings explain *why*, especially in `enforcers/strict.py`, `harm_oracle.py`, and `policy_lint.py`, where research validity depends on correct logic.
+- `gapfuzz` must never import `secagent` or `janus` directly — everything engine-specific lives behind `EnforcerAdapter`. This is what makes the cross-engine claim a config change, and it is a deliverable in its own right.
+- Do not modify AgentDojo scoring or the engines under test. Configure/observe only.
+- Test anything touching matching, harm-scoring, attribution, or aggregation. The taxonomy is pinned as "engine allows X, reference denies X," so a test starting to fail is the signal that a gap was fixed upstream.
+- API calls (Phase C only) need retry/backoff and must log rate-limit hits, never fail silently.
 
 ---
 
-## 11. Coding conventions
+## 11. Responsible research & disclosure
 
-- Type hints on all function signatures.
-- Docstrings explaining *why*, not just *what*, especially in `scope_check.py` and `attacker.py` where the research validity depends on correct logic.
-- Design `attacker.py` and `runner.py` so a different AgentDojo-wrapped defense could be swapped in without rewriting the attack loop — this reusability is itself a project deliverable (§3).
-- Do not modify AgentDojo's core scoring functions. If a bug is suspected in them, flag it — don't silently patch around it, since that undermines comparability to published numbers.
-- Do not modify Progent's policy engine itself — configure it through its supported interface only.
-- Write tests for anything that touches scoring, scope-checking, or result aggregation. LLM call correctness can't be unit-tested the same way, but the logic wrapped around it can be.
-- All API calls need retry/backoff and should log rate-limit hits, not fail silently.
+- Everything runs in AgentDojo's sandbox. No real accounts, services, or production tools, ever.
+- Both engines are real, installable open-source projects. **Disclosure precedes publication.** Notify maintainers with the findings and the hardening patch, state a window, then publish. Janus first (it is on PyPI advertising production use, and its fail-open behaviours are the most dangerous). Keep building meanwhile.
+- The write-up includes a Responsible Disclosure section. Working exploit strings against a real deployed instance are never published; the taxonomy, rates, and sandboxed reproductions are.
 
 ---
 
-## 12. Safety and responsible-research guardrails
+## 12. Bottom line
 
-- All execution stays inside AgentDojo's simulated environment. No real email accounts, no real banking APIs, no real production tools of any kind, ever.
-- Attacker-generated content is only ever tested against our own sandboxed setup — never against real, deployed third-party agents or services.
-- If anything resembling a genuinely novel, exploitable weakness in a real (non-sandboxed) system turns up unexpectedly, pause and raise it with the user before including specifics in any public write-up — default to responsible disclosure norms.
-
----
-
-## 13. Reference reading (in priority order)
-
-1. AgentDojo — https://arxiv.org/abs/2406.13352 — the benchmark itself
-2. Zhan et al., 2025 — https://arxiv.org/abs/2503.00061 — why static testing lies
-3. Nasr et al., "The Attacker Moves Second" — https://arxiv.org/abs/2510.09023 — the field's landmark result
-4. Progent — https://arxiv.org/abs/2504.11703 — the defense under test
-5. LaunchSafe — https://arxiv.org/abs/2606.26479 — the paper whose open question this project answers
-6. Swept AI — https://arxiv.org/abs/2604.23887 — the attack-loop methodology this project reuses
-
----
-
-## 14. Bottom line
-
-Success is not one number landing a certain way. Success is §3's four deliverables being checked off, honestly, whatever the numbers turn out to say.
+Success is the taxonomy proven and pinned, the harm validated on the benchmark's own oracle, the generalization shown across two engines, the fix shipped with its cost measured, and all of it reproducible by a reviewer in seconds with no API key — plus an honest write-up and responsible disclosure. Not one number landing a certain way.
