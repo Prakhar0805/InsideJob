@@ -169,10 +169,17 @@ def _cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--csv", type=Path, default=None, help="Also write a tidy CSV here.")
     args = parser.parse_args(argv)
 
+    # recursive=True so the documented `results/**/*.jsonl` form actually
+    # descends into the per-phase / per-model subtrees.
     expanded: list[Path] = []
     for pattern in args.paths:
-        expanded.extend(Path(p) for p in glob.glob(pattern)) or expanded.append(Path(pattern))
-    table = summarize_paths([p for p in expanded if p.exists()])
+        matches = [Path(p) for p in glob.glob(pattern, recursive=True)]
+        expanded.extend(matches if matches else [Path(pattern)])
+    files = sorted({p for p in expanded if p.is_file()})
+    if not files:
+        print(f"no result files matched: {' '.join(args.paths)}")
+        return 1
+    table = summarize_paths(files)
     print(table.render())
 
     if args.csv:
