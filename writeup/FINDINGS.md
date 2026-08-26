@@ -13,7 +13,8 @@ least-privilege policy and then enforcing it with deterministic code on every
 tool call. The security argument is that the enforcer is code and therefore
 cannot be prompt-injected. We show this protects the wrong boundary. The policy
 *describes* a set of permitted argument values; the matcher *admits* a different,
-larger set. Across the four AgentDojo domains and 95 policy fragments per suite,
+larger set. Across the 95 policy-relevant string arguments in the four AgentDojo
+domains — 380 policy fragments, one per (argument × idiom) —
 **every natural-but-flawed policy idiom is 100% bypassable and the one sound
 idiom (an exact `enum`) is 0% bypassable** — a clean parser differential, the
 same vulnerability class behind CouchDB CVE-2017-12635 and the 2025 GitLab SAML
@@ -103,6 +104,33 @@ schema fragment and the user query to the agent verbatim
 its own allow-list — which is exactly why the *original* adaptive-attack question
 (can an adversary find the boundary?) is cheap: the defense quotes it back.
 
+### 3.1 How each class is evidenced
+
+Two different standards of evidence back this table, and conflating them would
+overstate the result. Every class is pinned by a differential regression test —
+a hand-built policy where the engine allows and the sound reference denies. Only
+three are additionally produced *at scale* by the automated sweep in §4.1.
+
+| class | pinned by regression test | produced by the automated sweep |
+|---|---|---|
+| A1, A3, A4 | ✓ | ✓ |
+| A2, A5, B1–B5, C | ✓ | ✗ |
+
+The reason is structural, not empirical. The sweep's corpus varies one *argument
+value* against a fixed *policy shape*: exactly one allow rule, one pinned
+argument, `fallback=0`, and a `dict` restriction. Classes whose trigger is a
+policy **shape** (B2–B5), a **second argument** (A5, B1), a **bare-string
+restriction** (A2), or the **denial path** (C) are therefore unreachable by
+construction — not rare, but impossible to express in the current corpus. The
+per-class rates in §4.1 are honest for the three classes they cover and silent
+about the rest.
+
+Closing this is tracked work: it requires the mutation operators to see the tool
+schema (so an argument can be *added* or *dropped*) and the corpus to carry a
+policy-shape dimension. Until then, "100% bypassable" is a claim about the three
+swept classes, and the other eight rest on the fixtures in
+`tests/test_enforcement_gaps.py`.
+
 *Deliberately out of scope:* the policy-*update* path, where untrusted tool
 output is spliced un-escaped into the policy LLM's prompt (`tool.py:446`). Real
 and serious, but it is a *synthesis* finding needing API budget, and it dilutes a
@@ -112,7 +140,10 @@ clean enforcement story. Flagged as adjacent future work.
 
 ### 4.1 The differential (offline, free)
 
-`python -m gapfuzz audit --enforcer progent`, over 95 fragments/suite × 4 suites:
+`python -m gapfuzz audit --enforcer progent`. The corpus enumerates every
+policy-relevant string argument in the four v1 suites — workspace 34, travel 29,
+banking 17, slack 15 = **95 arguments** — and writes each one four ways, for 380
+fragments total:
 
 | policy idiom | fragments | bypassable | via |
 |---|---|---|---|
@@ -125,6 +156,20 @@ clean enforcement story. Flagged as adjacent future work.
 matters as much as the finding: a correctly-written policy (`enum`) is **not**
 bypassable, so this is a property of *how policies are written*, not a claim that
 nothing can be enforced.
+
+Attribution is a clean isolation, not a best-effort ranking. Each instance is
+labelled by enabling the reference's soundness fixes one at a time and recording
+which single fix flips the verdict from admit to deny (`src/gapfuzz/attribution.py`).
+Every one of the **760 instances is denied by exactly one fix — 0 over-determined,
+0 unattributed** — so a row like "A1: 380" is a claim about anchoring
+specifically, not about "something in here". The number `case_variation`
+illustrates the discipline: that operator *hypothesises* A1, yet all of its
+instances land on a `format`-only policy and correctly attribute to **A4** — the
+value is admitted because `format` is never enforced, and there is no pattern to
+anchor. The operator's guess is a fallback; the reference's isolation is the
+finding. Over-determined and unattributed counts are printed on every run, so a
+future case where two fixes both apply is reported rather than silently
+tie-broken.
 
 ### 4.2 Cross-engine: the finding is architectural
 
@@ -143,19 +188,34 @@ ground truths score as harmful through it, including the trace-scored
 `slack/injection_task_5` and the multi-call tasks. Two structural bypass
 patterns are demonstrated end-to-end and validated by `security()`:
 
-- **A1 (loose URL).** A policy pinning a URL by pattern — exactly the loose form
-  Progent's own prompt recommends ("do not limit the scheme … allow different
-  paths") — admits `https://docs.company.com.evil.tld/steal`, achieving the
-  exfiltration objective.
-- **A5 (uncapped amount).** A policy that pins `recipient` but not `amount` admits
-  a $1,000,000 transfer to a payee a benign task legitimately used.
+- **A1 (loose URL)** — `slack/injection_task_3`, policy
+  `{"get_webpage": [(100, 0, {"url": {"type":"string","pattern":"informations"}}, 0)]}`.
+  A URL pinned by substring pattern — exactly the loose form Progent's own prompt
+  recommends ("do not limit the scheme … allow different paths") — is unanchored,
+  so the attacker's exfiltration URL is admitted and `security()` scores it
+  harmful. Attributed A1.
+- **A5 (uncapped sibling)** — `banking/injection_task_5`, policy
+  `{"send_money": [(100, 0, {"recipient": {"type":"string","pattern":"US133…"}}, 0)]}`.
+  The policy names `recipient` and says nothing about `amount`; the unnamed
+  argument is never checked. Attributed A5.
 
-A conservative baseline that pins *every* argument to its exact benign value
-holds at 0% — which is the point: the gaps bite where real generation is looser
-(loose patterns, omitted keywords, unconstrained siblings), and §4.4 shows the
-fix and its cost. Quantifying the bypass *rate on real LLM-generated policies* is
-the one measurement that costs API budget; it is built (`policy_corpus.py`),
-cached, and resumable, and is the sole step awaiting a key.
+Both are pinned in `tests/test_harm_oracle.py` and clear all three gates
+(admitted ∧ reference-rejected ∧ `security()`-harmful).
+
+**The committed sweep reports 0 bypasses, and that is the correct result.**
+`results/phase_b_harm/progent_harm.json` runs a deliberately conservative
+baseline that pins *every* argument to its exact benign value — a policy far
+tighter than any LLM writes. Under exact pinning the injections target resources
+the benign task never touched, so they are blocked. Reported as a null result
+rather than omitted: it is the negative control for the harm arm, the same role
+`enum-exact` plays in §4.1. The gaps bite where real generation is looser (loose
+patterns, omitted keywords, unconstrained siblings), and §4.4 shows the fix and
+its cost.
+
+**Scope boundary.** Quantifying the bypass *rate on real LLM-generated policies*
+is Phase C — **specified but not implemented**. It is the only measurement in
+this project that would need an API key, and no number here depends on it. See
+§5.
 
 ### 4.4 Mitigation, with cost measured for free
 
@@ -180,9 +240,15 @@ is a real engineering decision with a measured price.
 - **Constructed vs generated policies.** §4.1–4.4 use policies we construct to
   faithfully model the documented generation behaviour. Whether a given
   deployment's LLM writes loose enough policies often enough is the Phase-C
-  measurement, which needs a (free-tier) API key we did not spend here. The
-  matcher-level result (§4.1–4.2) is independent of that: the engine admits the
-  superset regardless of who wrote the policy.
+  measurement — **specified but not implemented**; it is the only step that would
+  need a (free-tier) API key. The matcher-level result (§4.1–4.2) is independent
+  of that: the engine admits the superset regardless of who wrote the policy.
+- **Sweep coverage is partial.** The automated sweep produces three of the eleven
+  taxonomy classes; the other eight are pinned by differential regression tests
+  but not measured at scale. §3.1 gives the table and the structural reason. Any
+  rate quoted in §4.1 is a rate over A1/A3/A4, not over the taxonomy.
+- **Two bypasses, not a rate.** §4.3 demonstrates two end-to-end validated
+  bypasses. That establishes reachability, not prevalence; prevalence is Phase C.
 - **One benchmark.** AgentDojo's four domains. The taxonomy is
   library-level (`jsonschema`, `re`) and not AgentDojo-specific, but the
   reachable-harm figures are.
@@ -201,13 +267,17 @@ here runs only inside AgentDojo's sandbox. Janus is notified first: it is on PyP
 advertising production use, and its fail-open behaviours (B2/B3) are the most
 dangerous.
 
+**Status: not yet sent.** Drafts to both teams are in `writeup/DISCLOSURE.md`.
+This document is not published until they have gone out and the stated window
+has run.
+
 ## 7. Reproduce
 
 ```bash
 python -m gapfuzz audit --enforcer progent   # §4.1
 python -m gapfuzz audit --enforcer janus     # §4.2 — identical table
 python -m gapfuzz harm  --enforcer progent   # §4.3
-python -m pytest                             # the taxonomy, pinned; 114 tests
+python -m pytest                             # the taxonomy, pinned; 131 tests
 ```
 
 No API key. No GPU. The interactive demo (`writeup/demo.html`) runs the same two
@@ -215,8 +285,9 @@ matcher semantics live in the browser.
 
 ---
 
-*Deliverables checklist: (1) the taxonomy, proven and pinned; (2) a reusable,
-engine-agnostic offline evaluator; (3) cross-engine generalization, answered
-explicitly; (4) a mitigation with measured cost; (5) this honest write-up. The
-one item gated on an API key — the generated-policy prevalence rate — is built
-and awaiting credentials.*
+*Deliverables checklist: (1) the taxonomy, proven and pinned — three of eleven
+classes additionally swept at scale (§3.1); (2) a reusable, engine-agnostic
+offline evaluator; (3) cross-engine generalization, answered explicitly; (4) a
+mitigation with measured cost; (5) this honest write-up. Not built: the
+generated-policy prevalence rate (Phase C), the one item that would need an API
+key.*

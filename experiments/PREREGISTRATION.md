@@ -1,5 +1,27 @@
 # Pre-registered success criteria
 
+> # ⚠️ SUPERSEDED — 2026-08-24
+>
+> **This document pre-registers a study that was never run, and does not
+> describe what this project measures.** It belongs to the original framing:
+> an adaptive prompt-injection ASR study against Progent with a live LLM agent.
+> That study was abandoned because it needed a full agent rollout per data
+> point — months of free-tier budget for an underpowered result.
+>
+> The project now audits the *matcher* instead of the *agent*: an offline
+> differential between what a policy describes and what the enforcer admits.
+> Zero API calls, exact rather than statistical. **Nothing below is a live
+> commitment** — the thresholds, the ASR reference band, and the `atkfail`
+> reporting rules all refer to an experiment that does not exist.
+>
+> It is kept unedited as an honest record of the pivot, not as methodology.
+> For what the project actually claims, read `CLAUDE.md`, `writeup/FINDINGS.md`,
+> and `experiments/SUPERSEDED.md`. The `Locked:` line below was never filled in
+> because the study was abandoned before Phase 2 — that is the correct outcome,
+> not an oversight.
+
+---
+
 > **Status: DRAFT — not yet locked.** CLAUDE.md §3 and §8 require this document
 > to be **finalized and timestamped before Phase 2 (the full adaptive sweep)
 > begins**. Until the "Locked" line below is filled in and committed, only

@@ -24,6 +24,7 @@ from agentdojo.functions_runtime import FunctionCall
 
 from src.enforcers.base import EnforcerAdapter, GapClass, Policy, Verdict
 from src.enforcers.strict import StrictEnforcer
+from src.gapfuzz.attribution import attribute, attribute_calls
 from src.gapfuzz.operators import Candidate, mutate_call
 from src.harm_oracle import HarmOracle
 
@@ -122,7 +123,7 @@ def find_bypass(
         verdict = oracle.check(injection_task, ground_truth)
         if verdict.achieved and _reference_rejects_any(reference, policy, effectful):
             result.bypass_found = True
-            result.gap_class = _classify_literal(reference, policy, effectful)
+            result.gap_class = attribute_calls(policy, effectful).gap_class
             result.winning_function = effectful[0].function
             result.winning_call = dict(effectful[0].args)
             result.rationale = "policy admits the attacker's literal target call"
@@ -152,8 +153,9 @@ def find_bypass(
         mutated_call = FunctionCall(function=target.function, args=candidate.args)
         verdict = oracle.check(injection_task, [mutated_call])
         if verdict.achieved:
+            found = attribute(policy, target.function, candidate.args, hypothesis=candidate.hypothesis)
             result.bypass_found = True
-            result.gap_class = candidate.gap_class
+            result.gap_class = found.gap_class or candidate.hypothesis
             result.winning_function = target.function
             result.winning_call = dict(candidate.args)
             result.rationale = candidate.rationale
@@ -190,19 +192,6 @@ def _effectful_calls(calls: Sequence[FunctionCall]) -> list[FunctionCall]:
 
 def _reference_rejects_any(reference: StrictEnforcer, policy: Policy, calls: Sequence[FunctionCall]) -> bool:
     return any(not reference.would_allow(policy, c.function, c.args).allowed for c in calls)
-
-
-def _classify_literal(reference: StrictEnforcer, policy: Policy, calls: Sequence[FunctionCall]) -> GapClass | None:
-    """Attribute a literal-call bypass to the single gap the reference caught.
-
-    Runs the reference with one fix enabled at a time; the fix that flips the
-    verdict from allow to deny is the responsible gap class.
-    """
-    for gap in GapClass:
-        probe = StrictEnforcer(fixes=frozenset({gap}), deny_unknown_args=(gap == GapClass.A5_UNCONSTRAINED_SIBLINGS))
-        if any(not probe.would_allow(policy, c.function, c.args).allowed for c in calls):
-            return gap
-    return None
 
 
 def _trace_scored():

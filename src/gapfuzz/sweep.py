@@ -20,36 +20,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from src.enforcers.base import EnforcerAdapter, GapClass, GapInstance
+from src.enforcers.base import EnforcerAdapter, GapInstance
 from src.enforcers.strict import StrictEnforcer
+from src.gapfuzz.attribution import attribute
 from src.gapfuzz.corpus import PolicyFragment, suite_corpus
 from src.gapfuzz.operators import mutate_call
-
-
-def attribute_gap(
-    policy,
-    tool_name: str,
-    args: dict,
-    reference: StrictEnforcer,
-    fallback: GapClass,
-) -> GapClass:
-    """Name the single reference fix responsible for rejecting `args`.
-
-    The operator that *produced* a candidate is not always the gap that *lets it
-    through*: a payload appended to a `format`-only policy is admitted because
-    `format` is unenforced (A4), not because of anchoring (A1), even though the
-    mutation looks like a suffix. So attribution runs the reference with one fix
-    enabled at a time and reports the fix that flips allow->deny. Falls back to
-    the operator's own class if isolation is inconclusive.
-    """
-    for gap in GapClass:
-        probe = StrictEnforcer(
-            fixes=frozenset({gap}),
-            deny_unknown_args=(gap == GapClass.A5_UNCONSTRAINED_SIBLINGS),
-        )
-        if not probe.would_allow(policy, tool_name, args).allowed:
-            return gap
-    return fallback
 
 
 def sweep_fragment(
@@ -76,7 +51,7 @@ def sweep_fragment(
 
     seen: set[str] = set()
     for candidate in mutate_call(base_args):
-        signature = f"{candidate.gap_class.value}:{candidate.args.get(arg)!r}"
+        signature = f"{candidate.hypothesis.value}:{candidate.args.get(arg)!r}"
         if signature in seen:
             continue
         seen.add(signature)
@@ -87,15 +62,17 @@ def sweep_fragment(
         ref_verdict = reference.would_allow(fragment.policy, tool, candidate.args)
         if ref_verdict.allowed:
             continue  # both admit it: not a gap
-        gap_class = attribute_gap(fragment.policy, tool, candidate.args, reference, candidate.gap_class)
+        found = attribute(fragment.policy, tool, candidate.args, hypothesis=candidate.hypothesis)
         yield GapInstance(
-            gap_class=gap_class,
+            gap_class=found.gap_class or candidate.hypothesis,
             enforcer=enforcer.name,
             tool_name=tool,
             policy=fragment.policy,
             args=candidate.args,
             enforcer_verdict=engine_verdict,
             strict_verdict=ref_verdict,
+            attribution_method=found.method,
+            co_attributed=found.candidates if len(found.candidates) > 1 else frozenset(),
             note=f"style={fragment.style}; via {candidate.rationale}",
         )
 
@@ -122,6 +99,11 @@ class SweepReport:
     styles: dict[str, StyleReport] = field(default_factory=dict)
     instances: list[GapInstance] = field(default_factory=list)
     invariant_violations: int = 0
+    #: Attribution quality, reported so a per-class table can be trusted. An
+    #: instance denied by two independent fixes is `over_determined`; one the
+    #: full reference denies but no fix isolates is `unattributed`.
+    over_determined: int = 0
+    unattributed: int = 0
 
     def render(self) -> str:
         lines = [
@@ -137,6 +119,10 @@ class SweepReport:
             )
         lines.append("-" * 78)
         lines.append(f"total gap instances: {len(self.instances)}")
+        lines.append(
+            f"attribution: {self.over_determined} over-determined, "
+            f"{self.unattributed} unattributed"
+        )
         if self.invariant_violations:
             lines.append(
                 f"!! {self.invariant_violations} reference-soundness violations - see log; results suspect"
@@ -175,6 +161,10 @@ def run_sweep(
             for instance in sweep_fragment(fragment, enforcer, reference):
                 report.instances.append(instance)
                 style.gap_counts[instance.gap_class.value] += 1
+                if instance.attribution_method == "over-determined":
+                    report.over_determined += 1
+                elif instance.attribution_method == "unattributed":
+                    report.unattributed += 1
                 hit = True
             if hit:
                 style.bypassable_fragments += 1

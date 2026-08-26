@@ -22,10 +22,18 @@ from src.enforcers.base import GapClass
 
 @dataclass(frozen=True)
 class Candidate:
-    """A mutated call plus the gap class that motivated it."""
+    """A mutated call plus the operator's *hypothesis* about which gap admits it.
+
+    The name is deliberate: `hypothesis` is the operator's guess, not the
+    finding. Which gap actually lets the mutation through is decided by
+    isolating reference fixes in :mod:`src.gapfuzz.attribution` - and the two
+    often differ (a suffix on a `format`-only policy is admitted via A4, not the
+    A1 the suffix operator assumed). The hypothesis survives only as the
+    last-resort label when isolation is inconclusive.
+    """
 
     args: dict[str, Any]
-    gap_class: GapClass
+    hypothesis: GapClass
     rationale: str
 
 

@@ -10,12 +10,12 @@ Progent (UC Berkeley), Janus, and the whole "policy-as-code for agents" family s
 
 ## What we found (all reproducible offline)
 
-- **The matcher admits a strict superset of the policy.** Across 95 policy fragments per suite, every flawed-but-natural policy idiom is **100% bypassable**; the one sound idiom (an exact `enum`) is **0%**. 760 labelled gap instances.
+- **The matcher admits a strict superset of the policy.** Across the 95 policy-relevant string arguments in the four AgentDojo domains — 380 policy fragments, one per (argument × idiom) — every flawed-but-natural idiom is **100% bypassable**; the one sound idiom (an exact `enum`) is **0%**. 760 labelled gap instances.
 - **`pattern` is unanchored** (`re.search`): `pattern:"GB29NWBK…"` also admits `GB29NWBK…-ATTACKER`. Progent's bare-string branch uses `re.match` — prefix-only.
 - **Schema keywords are silently ignored off-type**: `{"type":"array","pattern":"^emma@corp.com$"}` enforces *nothing* — and Progent's own prompt warns the LLM about this, which means they know the model gets it wrong.
 - **`format` is recommended to the policy LLM and never enforced.** **Deny rules fail open** — any error evaluating a forbid rule deletes it. **"Default deny" isn't even a construct** — it's governed by the last rule's fallback field.
 - **The engine leaks its own boundary**: every denial hands the agent the exact allowed-value set (`'DE89…' is not one of ['GB29…']`).
-- **Validated harm, not just theory.** An admitted call only counts when AgentDojo's own state-based `security()` predicate confirms it achieves the attacker's objective. The oracle is calibrated on all 25/25 injection tasks.
+- **Harm is scored by the benchmark, never by us.** An admitted call only counts when AgentDojo's own state-based `security()` predicate confirms it achieves the attacker's objective; the oracle is calibrated on all 25/25 injection tasks. Two structural bypasses are demonstrated end-to-end this way. The committed sweep (`results/phase_b_harm/`) uses a deliberately conservative baseline that pins *every* argument to its exact benign value, and correctly reports **0 bypasses** — exact pinning is sound, which is the point. The gaps bite where real policies are looser.
 - **A fix, with its cost measured for free.** The taxonomy splits: **A1–A4 close by rewriting the policy alone — 100% of legitimate tasks preserved.** A5 and the control-flow gaps are matcher behaviors that need the engine to adopt strict semantics; closing A5 by denying unnamed arguments costs ~12% utility. Every number is computed with zero API calls.
 
 ## Reproduce it in seconds
@@ -27,7 +27,7 @@ pip install -e ./agentdojo -e ./progent && pip install -r requirements.txt
 python -m gapfuzz audit --enforcer progent           # the differential result
 python -m gapfuzz audit --enforcer strict            # self-consistency: 0 gaps
 python -m gapfuzz harm  --enforcer progent           # reachable-harm sweep
-python -m pytest                                     # 106 tests; the taxonomy is pinned here
+python -m pytest                                     # 131 tests; the taxonomy is pinned here
 ```
 
 No `.env`, no API key, no cost. Every gap in `tests/test_enforcement_gaps.py` is written as *"the real engine allows X, a sound matcher denies X"* — so the day one starts failing is the day the gap was fixed upstream.
@@ -60,7 +60,14 @@ And a global invariant, asserted in every run: the strict reference never admits
 
 ## Honest scope
 
-This characterizes **one** enforcement-layer weakness and fixes part of it. It does not "solve" prompt injection. The reachable-harm rate on *LLM-generated* (rather than constructed) policies is the one measurement that costs a little API budget — it is built, cached, and resumable, and is the only step that needs a key. The systems under test are real open-source projects; **maintainers are notified before publication** (see `CLAUDE.md` §11).
+This characterizes **one** enforcement-layer weakness and fixes part of it. It does not "solve" prompt injection.
+
+Two scope boundaries stated plainly, because both are easy to overstate:
+
+- **Constructed, not generated, policies.** Every number above comes from policies we construct to model the documented generation behaviour. The bypass rate on *real LLM-written* policies is Phase C — **specified, not yet implemented**; it is the only step that would need an API key.
+- **Three of eleven taxonomy classes are produced by the automated sweep** (A1, A3, A4). The other eight are pinned by differential regression tests rather than swept, because the corpus generates a single policy shape. See `writeup/FINDINGS.md` §3 for the coverage table and the reason.
+
+The systems under test are real open-source projects. **Disclosure precedes publication**: drafts to both maintainer teams are in `writeup/DISCLOSURE.md` and have **not yet been sent** — that gate is open, and this repo is not public until it closes (see `CLAUDE.md` §11).
 
 ## Origins
 

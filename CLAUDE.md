@@ -55,6 +55,8 @@ Every row was executed against the installed `jsonschema` 4.26.0 / `z3-solver` 5
 
 **C — boundary disclosure:** every Progent denial hands the agent the schema fragment and the user query verbatim (`'DE89…' is not one of ['GB29…']`). The engine is an oracle for its own boundary — which is why the *original* adaptive-attack question is cheap: the defense quotes the answer back.
 
+**Coverage — two standards of evidence, do not conflate them.** Every class above is pinned by a differential regression test. Only **A1, A3, A4** are additionally produced at scale by `gapfuzz audit`. The other eight are unreachable by the current sweep *by construction*, not by rarity: the corpus varies one argument *value* against a fixed policy *shape* (one allow rule, one pinned arg, `fallback=0`, `dict` restriction), so classes triggered by a policy shape (B2–B5), a second argument (A5, B1), a bare-string restriction (A2), or the denial path (C) cannot be expressed. Closing this needs the mutation operators to see the tool schema and the corpus to carry a shape dimension. **Until then, never quote a sweep rate as a rate over "the taxonomy" — it is a rate over A1/A3/A4.**
+
 **Out of scope (by choice, to keep the thesis clean):** the policy-*update* path where untrusted tool output is spliced into the policy LLM's prompt. Real and serious, but it is a *synthesis* finding, needs API budget, and dilutes a clean enforcement story. Noted as adjacent future work only.
 
 ---
@@ -109,7 +111,7 @@ Every row was executed against the installed `jsonschema` 4.26.0 / `z3-solver` 5
 2. **`gapfuzz/`** — mutation operators (one family per gap class), the bypass search (admitted ∧ reference-rejected ∧ harmful), the differential sweep, and the reachable-harm sweep. CLI: `python -m gapfuzz`.
 3. **`harm_oracle.py`** — the zero-LLM oracle over AgentDojo's `security()` predicates.
 4. **`policy_lint.py` / `utility_cost.py`** — the mitigation and its measured cost.
-5. **`policy_corpus.py`** — the only API-spending step (generate real policies; cached, resumable).
+5. **`policy_corpus.py`** — the only API-spending step (generate real policies; cached, resumable). **PLANNED — not yet written.**
 
 ---
 
@@ -119,7 +121,7 @@ Every row was executed against the installed `jsonschema` 4.26.0 / `z3-solver` 5
 - **Benchmark:** AgentDojo (vendored, unmodified — `agentdojo/`). We reuse its tasks, environments, and `security()`/`utility` scoring as-is.
 - **Systems under test:** Progent (vendored as `progent/`, package `secagent`) and Janus (`pip install janus-guard`). Both unmodified.
 - **Compute:** none. No GPU, no model hosting, no fine-tuning.
-- **Cost ceiling: $0.** The core result (Phases A/B/E) makes **zero** API calls. Only the optional generated-policy study (`policy_corpus.py`) calls an API, on a free tier, batched and cached. Groq free tier has no card attached: over-limit returns HTTP 429, never a charge.
+- **Cost ceiling: $0.** The core result (Phases A/B/E) makes **zero** API calls. Only the optional generated-policy study (`policy_corpus.py`, not yet built) would call an API, on a free tier, batched and cached. Groq free tier has no card attached: over-limit returns HTTP 429, never a charge.
 - **Secrets:** API keys live in `.env` (gitignored), loaded via `python-dotenv`. Never hardcode, never log, never commit.
 
 ---
@@ -137,11 +139,11 @@ InsideJob/
 │   ├── harm_oracle.py         # zero-LLM AgentDojo harm oracle
 │   ├── policy_lint.py         # detect + repair gaps
 │   ├── utility_cost.py        # free false-positive measurement of hardening
-│   ├── policy_corpus.py       # the only API-spending step (Phase C)
+│   ├── policy_corpus.py       # PLANNED (Phase C) - not yet present
 │   ├── config.py llm_clients.py  # kept for Phase C; token-aware free-tier pacing
 │   └── agent.py case_runner.py runner.py  # retained for the Phase-D end-to-end proof
 ├── gapfuzz/                   # thin shim so `python -m gapfuzz` works
-├── tests/                     # 106+ tests; the taxonomy is pinned here
+├── tests/                     # 131 tests; the taxonomy is pinned here
 ├── experiments/  results/  writeup/
 ```
 
@@ -151,10 +153,10 @@ InsideJob/
 
 | Phase | Goal | Status |
 |---|---|---|
-| A. Differential harness | Matcher vs strict reference; every flawed idiom's bypass rate, per gap class | **done** — 100% of flawed idioms, 0% of exact enum; 760 instances; free |
-| B. Reachable harm | Admitted-and-harmful validated by AgentDojo `security()` | **done** — oracle calibrated 25/25; validated bypasses demonstrated |
-| C. Generated policies | Show the gaps occur in *real* LLM-written policies (only API spend) | ready to run when a key is present; cached + resumable |
-| D. Cross-engine + e2e | Janus adapter; a handful of real agent rollouts as an existence proof | Janus adapter + small rollout budget |
+| A. Differential harness | Matcher vs strict reference; every flawed idiom's bypass rate, per gap class | **done, partial coverage** — 100% of flawed idioms, 0% of exact enum; 760 instances; free. Sweep produces A1/A3/A4 only (see §3 coverage note) |
+| B. Reachable harm | Admitted-and-harmful validated by AgentDojo `security()` | **done** — oracle calibrated 25/25; two bypasses validated end-to-end (`tests/test_harm_oracle.py`). The committed sweep uses an exact-pinned baseline and correctly reports 0 — a negative control, not a null finding |
+| C. Generated policies | Show the gaps occur in *real* LLM-written policies (only API spend) | **not started** - specified, not implemented |
+| D. Cross-engine + e2e | Janus adapter; a handful of real agent rollouts as an existence proof | **Janus adapter done** — byte-identical gap profile. Agent rollouts dropped: they need API budget and add nothing the differential does not already show |
 | E. Mitigation | `policy_lint` closes A1–A4 free; measure the A5/B engine-level cost | **done** — 100% utility for policy-level fixes, ~88% with A5 |
 | F. Deliverables | Repo + tool + interactive artifact + write-up + responsible disclosure | in progress |
 

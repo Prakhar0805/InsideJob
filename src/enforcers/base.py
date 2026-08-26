@@ -143,6 +143,15 @@ class GapInstance:
     enforcer_verdict: Verdict
     strict_verdict: Verdict
     note: str = ""
+    #: How :mod:`src.gapfuzz.attribution` reached ``gap_class`` (``isolated``,
+    #: ``over-determined``, ``leave-one-out``, ``unattributed``). Recorded so an
+    #: aggregate can report *how cleanly* the taxonomy separated, not just the
+    #: per-class counts.
+    attribution_method: str = "isolated"
+    #: When more than one fix independently denies the call, every contender.
+    #: ``gap_class`` is the enum-lowest of these; this set keeps the rest visible
+    #: instead of silently dropping them.
+    co_attributed: frozenset[GapClass] = frozenset()
 
     @property
     def is_permissive(self) -> bool:
@@ -166,6 +175,8 @@ class GapInstance:
             "enforcer_reason": self.enforcer_verdict.reason,
             "strict_reason": self.strict_verdict.reason,
             "agent_visible_error": self.enforcer_verdict.agent_visible_error,
+            "attribution_method": self.attribution_method,
+            "co_attributed": sorted(g.value for g in self.co_attributed),
             "note": self.note,
         }
 
