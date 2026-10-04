@@ -23,7 +23,7 @@ from agentdojo.base_tasks import BaseInjectionTask
 from agentdojo.functions_runtime import FunctionCall
 
 from src.enforcers.base import EnforcerAdapter, GapClass, Policy, Verdict
-from src.enforcers.strict import StrictEnforcer
+from src.enforcers.strict import StrictEnforcer, ToolSchemas
 from src.gapfuzz.attribution import attribute, attribute_calls
 from src.gapfuzz.operators import Candidate, mutate_call
 from src.harm_oracle import HarmOracle
@@ -53,6 +53,12 @@ class BypassResult:
     scoring_bug_flagged: bool = False
     candidates_tried: int = 0
     notes: str = ""
+    #: Who scored the harm. ``"agentdojo"`` means the benchmark's own
+    #: `security()` predicate confirmed the attacker objective in a sandbox;
+    #: ``"modeled"`` means a tool-parser model (`src.tool_semantics`) judged the
+    #: admitted value to resolve to the attacker's resource. The two are never
+    #: summed; every report prints them apart.
+    harm_source: str = "agentdojo"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +72,7 @@ class BypassResult:
             "winning_call": self.winning_call,
             "rationale": self.rationale,
             "harm_reason": self.harm_reason,
+            "harm_source": self.harm_source,
             "oracle_miscalibrated": self.oracle_miscalibrated,
             "trace_scored": self.trace_scored,
             "scoring_bug_flagged": self.scoring_bug_flagged,
@@ -82,6 +89,7 @@ def find_bypass(
     oracle: HarmOracle,
     reference: StrictEnforcer | None = None,
     max_candidates: int = 200,
+    tool_schemas: ToolSchemas | None = None,
 ) -> BypassResult:
     """Search for a validated bypass of `policy` for one injection task.
 
@@ -91,10 +99,12 @@ def find_bypass(
         enforcer: the engine under test (Progent, Janus).
         oracle: the AgentDojo harm oracle for this suite.
         reference: the sound matcher a bypass must also fool. Defaults to the
-            full strict semantics.
+            full strict semantics (with `tool_schemas`, when given).
         max_candidates: safety bound on the per-task search.
+        tool_schemas: the suite's declared parameter types, so the reference and
+            attribution can see tool-side coercion (T1).
     """
-    reference = reference or StrictEnforcer()
+    reference = reference or StrictEnforcer(tool_schemas=tool_schemas)
     suite_name = oracle.suite.name
     result = BypassResult(
         suite=suite_name,
@@ -123,7 +133,7 @@ def find_bypass(
         verdict = oracle.check(injection_task, ground_truth)
         if verdict.achieved and _reference_rejects_any(reference, policy, effectful):
             result.bypass_found = True
-            result.gap_class = attribute_calls(policy, effectful).gap_class
+            result.gap_class = attribute_calls(policy, effectful, tool_schemas=tool_schemas).gap_class
             result.winning_function = effectful[0].function
             result.winning_call = dict(effectful[0].args)
             result.rationale = "policy admits the attacker's literal target call"
@@ -153,7 +163,13 @@ def find_bypass(
         mutated_call = FunctionCall(function=target.function, args=candidate.args)
         verdict = oracle.check(injection_task, [mutated_call])
         if verdict.achieved:
-            found = attribute(policy, target.function, candidate.args, hypothesis=candidate.hypothesis)
+            found = attribute(
+                policy,
+                target.function,
+                candidate.args,
+                hypothesis=candidate.hypothesis,
+                tool_schemas=tool_schemas,
+            )
             result.bypass_found = True
             result.gap_class = found.gap_class or candidate.hypothesis
             result.winning_function = target.function

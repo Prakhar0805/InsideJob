@@ -26,3 +26,9 @@ progent/**/logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# Phase C generated-policy corpus: commit the summary JSON, ignore the raw log/dumps
+results/policy_corpus/**/*.jsonl
+results/policy_corpus/**/raw/
+
+CLAUDE.md

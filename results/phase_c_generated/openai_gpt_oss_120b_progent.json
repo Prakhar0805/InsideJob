@@ -1,0 +1,49 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "enforcer": "progent",
+  "n_policies": 55,
+  "generation_failures": 0,
+  "idiom_by_kind": {
+    "path": {
+      "enum/const": 4
+    },
+    "iban": {
+      "type-only": 2,
+      "other": 3,
+      "enum/const": 4
+    },
+    "amount": {
+      "type-only": 2,
+      "other": 4,
+      "enum/const": 2
+    },
+    "other": {
+      "type-only": 19,
+      "other": 100,
+      "unanchored-pattern": 3,
+      "enum/const": 52,
+      "bare-string": 2,
+      "anchored-pattern": 4,
+      "anchored-pattern-typeless": 2
+    },
+    "url": {
+      "enum/const": 2,
+      "other": 1,
+      "anchored-pattern": 6,
+      "anchored-pattern-typeless": 1
+    },
+    "email": {
+      "other": 9,
+      "type-only": 3
+    }
+  },
+  "lint_by_class": {
+    "A1_unanchored": 5,
+    "A5_unconstrained_siblings": 25,
+    "A3_type_scoped_noop": 3
+  },
+  "n_with_lint_finding": 21,
+  "share_with_lint_finding": 0.3818,
+  "n_engine_bypassable": 1,
+  "share_engine_bypassable": 0.0182
+}

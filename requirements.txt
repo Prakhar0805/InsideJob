@@ -9,14 +9,12 @@
 # Everything below is what *our* code in src/ needs on top of those.
 
 python-dotenv>=1.0.1
-openai>=1.59.7          # also used for Groq + Gemini via OpenAI-compatible endpoints
-tenacity>=8.2.3         # retry/backoff on free-tier throttling
+openai>=1.59.7          # Groq and Gemini are reached via OpenAI-compatible endpoints
 pydantic>=2.7.1
-pandas>=2.2.0           # results aggregation
 pytest>=8.0.0
 
-# Cross-engine generalization check (Phase D). The second, independently-built
-# policy engine under test. Optional: the core suite runs without it (its tests
+# Cross-engine check. The second policy engine under test, a reimplementation
+# of Progent's design. Optional: the core suite runs without it (its tests
 # skip if absent). Pinned because the differential result is version-specific.
 # NOTE: janus-guard pins openai<2, which downgrades the openai package; this is
 # harmless here (our clients only use the chat.completions path) but explains

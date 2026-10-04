@@ -50,9 +50,9 @@ TRACE_SCORED_TASKS: frozenset[tuple[str, str]] = frozenset({("slack", "injection
 #: `any(service or "" in t.subject.lower() ...)` parses as
 #: `any((service) or (...))`, and `service` is a non-empty string, so the check
 #: is truthy for *any* transaction to the attacker IBAN regardless of subject.
-#: We do NOT fix it — CLAUDE.md forbids touching AgentDojo's scoring, and
-#: patching it would break comparability with every published number. Results
-#: for these tasks are flagged and reported separately.
+#: We do NOT fix it — the benchmark's scoring is used as-is, and patching it
+#: would break comparability with every published number. Results for these
+#: tasks are flagged and reported separately.
 SCORING_BUG_TASKS: frozenset[tuple[str, str]] = frozenset(
     {("banking", "injection_task_0"), ("banking", "injection_task_1"), ("banking", "injection_task_3")}
 )

@@ -1,10 +1,16 @@
-"""Cross-engine generalization: Janus exhibits the same gaps as Progent.
+"""Cross-engine generalization: which gaps propagate to a reimplementation.
 
-Janus (`janus-guard`) was built independently, by a different team, yet adopted
-the same policy shape and the same enforcement primitives. If the taxonomy
-reproduces here, the finding is architectural — a property of "LLM writes a
-JSON-Schema policy, code matches it" — not one team's bug. That is the single
-biggest thing separating this from a bug report.
+Janus (`janus-guard`) is a reimplementation of Progent's design - its
+policy-generation prompt is Progent's system prompt verbatim and its generator
+emits the same `(100, 0, args, 0)` rules - with its own enforcer code. That
+makes it the right second engine for a *lineage* question rather than a
+convergence one: a gap that lives in the shared primitives (`jsonschema`,
+`re.match`, `if arg in kwargs`) should reappear in any faithful
+reimplementation, while a gap that is one codebase's control-flow bug should
+not. Both halves are asserted here: A1-A5, B1, B5 and T1 propagate; B2 (the
+loop-carried fallback) does not, and one B3 flavour (a malformed deny regex)
+fails closed in Janus. That per-class split is what the write-up means by
+"a property of the design".
 
 Skipped automatically if `janus-guard` is not installed, so the core suite still
 runs without it.
@@ -78,9 +84,9 @@ def test_janus_exact_enum_is_sound(janus):
 
 
 def test_janus_and_progent_agree_on_the_taxonomy():
-    """The two engines should give the same verdicts on the gap fixtures.
+    """The two engines give the same verdicts on the shared-primitive fixtures.
 
-    Same architecture, same gaps — this asserts the cross-engine result numerically
+    Same primitives, same gaps - this asserts the propagation result numerically
     rather than by eyeballing two sweep tables.
     """
     progent = build_enforcer("progent")
@@ -95,4 +101,76 @@ def test_janus_and_progent_agree_on_the_taxonomy():
         assert (
             progent.would_allow(policy, tool, args).allowed
             == janus.would_allow(policy, tool, args).allowed
-        ), f"engines disagree on {args} — the architectural claim would need qualifying"
+        ), f"engines disagree on {args} - the propagation claim would need qualifying"
+
+
+def test_B2_is_progent_only(janus, strict):
+    """B2 did not propagate: Janus has a real default-deny, not a loop-carried fallback.
+
+    The one control-flow bug in Progent's `_check_tool_call` that is a *code*
+    defect rather than a design choice. A reimplementation with its own control
+    flow does not inherit it - which is exactly what distinguishes this class
+    from A1-A5/B1 in the cross-engine profile.
+    """
+    policy = {
+        "t": [
+            (1, 0, {"a": {"enum": ["GOOD"]}}, 0),
+            (2, 0, {"a": {"enum": ["OTHER"]}}, 3),  # out-of-range fallback on the last rule
+        ]
+    }
+    progent = build_enforcer("progent")
+    assert progent.would_allow(policy, "t", {"a": "EVIL"}).allowed, "Progent: B2 present"
+    assert not janus.would_allow(policy, "t", {"a": "EVIL"}).allowed, "Janus: real default-deny"
+    assert not strict.would_allow(policy, "t", {"a": "EVIL"}).allowed
+
+
+def test_B3_malformed_deny_regex_fails_closed_in_janus(janus):
+    """One B3 flavour did not propagate either: Janus lets `re.error` escape.
+
+    Progent's bare `except: continue` swallows it and drops the deny rule;
+    Janus catches only its own `ArgumentValidationError`, so a malformed regex
+    propagates and the call is refused. The throwing-predicate flavour *does*
+    propagate (Janus wraps custom-validator errors into the caught type) - see
+    the per-class profile.
+    """
+    policy = {"t": [(1, 1, {"to": {"type": "string", "pattern": "[unclosed"}}, 0), (2, 0, {}, 0)]}
+    progent = build_enforcer("progent")
+    assert progent.would_allow(policy, "t", {"to": "evil"}).allowed
+    assert not janus.would_allow(policy, "t", {"to": "evil"}).allowed
+
+
+def test_per_class_progent_vs_janus_profile(janus):
+    """The verified per-class matrix, as a test and as the `gapfuzz crossengine` table."""
+    from src.gapfuzz.crossengine import run_crossengine
+
+    progent = build_enforcer("progent")
+    report = run_crossengine([progent, janus])
+    rows = {row.gap_class: row for row in report.rows}
+
+    propagated = {
+        GapClass.A1_UNANCHORED, GapClass.A2_RAW_REGEX, GapClass.A3_TYPE_SCOPED_NOOP,
+        GapClass.A4_FORMAT_UNENFORCED, GapClass.A5_UNCONSTRAINED_SIBLINGS,
+        GapClass.B1_ABSENT_ARG_SKIP, GapClass.B3_DENY_FAILS_OPEN, GapClass.B4_PRECEDENCE_INVERSION,
+        GapClass.B5_NO_POLICY_ALLOWS, GapClass.T1_TOOL_COERCION,
+    }
+    for gap in propagated:
+        assert rows[gap].verdicts == {"progent": True, "janus": True}, gap
+        assert rows[gap].label == "propagated", gap
+
+    assert rows[GapClass.B2_FALLBACK_LEAK].verdicts == {"progent": True, "janus": False}
+    assert rows[GapClass.B6_SUBSET_CHECK_FAILS_OPEN].verdicts == {"progent": True, "janus": None}
+
+    # The reference denies every matcher witness except the per-spec B4 shape,
+    # which it deliberately does not "fix".
+    for gap, row in rows.items():
+        if gap is GapClass.B6_SUBSET_CHECK_FAILS_OPEN:
+            assert row.reference_denies is None
+        elif gap is GapClass.B4_PRECEDENCE_INVERSION:
+            assert row.reference_denies is False and not row.has_reference_fix
+        else:
+            assert row.reference_denies is True, gap
+            assert row.has_reference_fix, gap
+
+    rendered = report.render()
+    assert "not a bypass rate" in rendered
+    assert "verbatim" in rendered, "the lineage note must travel with the table"

@@ -11,6 +11,9 @@ from typing import Callable
 
 from src.enforcers.base import (
     ALLOW,
+    PERMISSIVE_GAPS,
+    BaseEnforcer,
+    DisclosureInstance,
     EnforcerAdapter,
     GapClass,
     GapInstance,
@@ -18,12 +21,16 @@ from src.enforcers.base import (
     Rule,
     Verdict,
     normalise_rule,
+    policy_literals,
 )
 from src.enforcers.strict import ALL_FIXES, StrictEnforcer
 
 __all__ = [
     "ALLOW",
     "ALL_FIXES",
+    "PERMISSIVE_GAPS",
+    "BaseEnforcer",
+    "DisclosureInstance",
     "EnforcerAdapter",
     "GapClass",
     "GapInstance",
@@ -33,6 +40,7 @@ __all__ = [
     "Verdict",
     "build_enforcer",
     "normalise_rule",
+    "policy_literals",
     "available_enforcers",
 ]
 

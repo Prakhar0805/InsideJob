@@ -1,92 +1,82 @@
-# Responsible disclosure — working notes
+# Notes for the maintainers
 
-Both systems under test are real open-source projects. These are the draft
-notifications to send **before** any public release, with a stated response
-window (proposed: 90 days, or on fix, whichever is first). No working exploit
-against a deployed instance is included; the sandboxed reproduction and the
-hardening patch are.
+**Status: nothing has been sent yet.** These are the per-engine summaries I
+intend to send to the Progent and Janus maintainers. They are kept here so the
+repository says exactly what has and has not been reported.
 
-Order: **Janus first** — it is published on PyPI advertising production use, and
-its fail-open behaviours (B2/B3) are the most dangerous. Progent is a research
-artifact but widely referenced.
-
----
-
-## Draft — to the Janus maintainers (`janus-guard`)
-
-> **Subject: Enforcement-gap findings in janus-guard's policy matcher, with a patch**
->
-> Hi — we've been studying the enforcement layer of code-level agent policy
-> engines and ran a differential audit of `janus-guard` 0.0.5 against a sound
-> reference matcher. We'd like to share the findings privately before we write
-> anything up, and we've included a hardening approach you're free to use.
->
-> The core issue is that the matcher admits a strict superset of what a policy
-> appears to allow. Concretely, in `janus/policy/validator.py` and
-> `janus/policy/enforcer.py`:
->
-> - `validate_argument` sends a `dict` restriction to `jsonschema.validate` with
->   no `format_checker`, so `pattern` matches unanchored (`re.search`) and
->   `format` is a no-op; and a `str` restriction to `re.match`, which is
->   prefix-only. A value like `alice@corp.com` in a `pattern` also admits
->   `evil@x.com#alice@corp.com`.
-> - Schema keywords are silently ignored off-type, so
->   `{"type":"array","pattern":"^x$"}` constrains nothing.
-> - `_check_conditions` guards with `if arg_name in arguments`, so a restriction
->   on an argument the caller omits is skipped, and arguments the policy never
->   names are unconstrained.
->
-> We measured every "natural" policy idiom (a pinned `pattern`, a `pattern`
-> without `type`, a `format`) as fully bypassable, while an exact `enum` is not.
-> The same profile appears in Progent, which suggests it's architectural rather
-> than specific to your code.
->
-> Suggested mitigations, in order of cost: anchor `pattern` to a full match and
-> treat pasted literals as `const`; enable a `format_checker` (and reject
-> `format` as a sole constraint for `uri`, which has no checker); reject a schema
-> whose keyword doesn't apply to its declared type; and — the higher-cost one —
-> deny arguments not named by the matching allow rule (`additionalProperties:
-> false` semantics), which needs to live in the matcher, not the policy. We have
-> a reference implementation and a utility-cost measurement we're happy to share.
->
-> Timeline: we plan to publish in [90 days / on your fix]. Glad to coordinate.
+Both engines are open-source research and library code. Everything in this
+repository runs inside AgentDojo's sandbox on synthetic tasks; nothing was run
+against a deployed system, and no exploit against a specific deployment is
+included.
 
 ---
 
-## Draft — to the Progent maintainers (sunblaze-ucb/progent)
+## Janus (`janus-guard` 0.0.5)
 
-> **Subject: Enforcement-matcher findings in Progent (secagent), with a patch**
->
-> Hi — following on from the Progent paper, we audited the `secagent` matcher
-> against a sound reference and found that it admits a superset of what generated
-> policies appear to allow. Sharing privately before write-up.
->
-> In `secagent/tool.py`: `check_arg` matches `dict` restrictions via
-> `jsonschema.validate` (no `format_checker` → `pattern` unanchored, `format`
-> inert) and `str` restrictions via `re.match` (prefix-only). `_check_tool_call`
-> skips restrictions on absent arguments (`if arg_name in kwargs`) and never
-> constrains unnamed ones. Two control-flow issues compound it: a forbid rule
-> that raises is dropped by a bare `except: continue` (fails open), and the
-> fall-through default-deny reads the *last iterated rule's* `fallback`, so an
-> out-of-range value there defeats it.
->
-> Separately, two things worth a look: policy denials are returned to the model
-> with the full schema fragment and the user query, which discloses the
-> allow-list to a compromised agent; and `security_policy_subset_check`'s z3
-> backend raises `NotImplementedError` on `^`/`$` anchors, swallowed as "subset
-> holds" — so anchoring a pattern (the safe thing) currently disables that check.
->
-> We have a linter that closes the policy-expressible gaps (anchoring, types,
-> formats) at zero measured utility cost on AgentDojo, plus a measurement of the
-> cost of the matcher-level fixes. Happy to share everything. Proposed timeline:
-> [90 days / on fix].
+In `janus/policy/validator.py` and `janus/policy/enforcer.py`:
+
+- `validate_argument` sends a `dict` restriction to `jsonschema.validate` with
+  no `format_checker`, so `pattern` matches unanchored (`re.search`) and
+  `format` is not checked. A `str` restriction goes to `re.match`, which is
+  prefix-only. A `pattern` of `alice@corp.com` also admits
+  `evil@x.com#alice@corp.com`.
+- Schema keywords are ignored on the wrong type, so
+  `{"type":"array","pattern":"^x$"}` constrains nothing.
+- `_check_conditions` guards with `if arg_name in arguments`, so a restriction
+  on an argument the caller omits is skipped, and arguments the policy never
+  names are unconstrained.
+
+In the sweep, every loose idiom (a pinned `pattern`, a `pattern` without
+`type`, a `format`) is bypassable and an exact `enum` is not. Progent shows the
+same profile on these classes, which points at the shared primitives and not at
+Janus's own code.
+
+Possible mitigations, cheapest first:
+
+1. Anchor `pattern` to a full match and treat pasted literals as `const`.
+2. Enable a `format_checker`, and do not accept `format` as the only constraint
+   for `uri`, which has no checker.
+3. Reject a schema whose keyword does not apply to its declared type.
+4. Deny arguments not named by the matching allow rule
+   (`additionalProperties: false` semantics). This one has to live in the
+   matcher and has a utility cost (about 12% of AgentDojo tasks in my
+   measurement).
 
 ---
 
-## What we will and won't publish
+## Progent (`secagent`, sunblaze-ucb/progent at `8a8eb89`)
 
-- **Will:** the taxonomy, the differential rates, the cross-engine result, the
-  sandboxed AgentDojo reproductions, and the `policy_lint` fix.
-- **Won't (until fixed / window elapses):** step-by-step exploit strings aimed at
-  any specific deployed agent; anything that only serves to weaponise rather than
-  explain.
+In `secagent/tool.py`:
+
+- `check_arg` matches `dict` restrictions via `jsonschema.validate` with no
+  `format_checker` (so `pattern` is unanchored and `format` is not checked) and
+  `str` restrictions via `re.match` (prefix-only).
+- `_check_tool_call` skips restrictions on absent arguments
+  (`if arg_name in kwargs`) and does not constrain unnamed ones.
+- A forbid rule that raises during evaluation is dropped by a bare
+  `except: continue`.
+- The fall-through default reads the last iterated rule's `fallback`, so an
+  out-of-range value there results in an allow.
+
+Two further observations:
+
+- A denial at priority 100 returns the failing schema fragment and the user
+  query to the model, which tells a compromised agent what the allow-list is.
+  The lower-priority branch already returns a generic refusal.
+- `security_policy_subset_check`'s z3 backend raises on `^`/`$`/`\A`/`\Z`
+  anchors, and `solve_schema` treats the swallowed error as "no counterexample".
+  An update that widens an anchored pattern (`^GOOD$` to `^.*$`) is accepted as
+  a narrowing. This interacts badly with my own `policy_lint`, which anchors
+  every pattern (see `tests/test_progent_subset_check.py`).
+
+`policy_lint` closes the policy-expressible gaps (anchoring, types, formats)
+with no measured utility cost on AgentDojo. The matcher-level fixes and their
+cost are in `FINDINGS.md` §4.4.
+
+---
+
+## What is and is not in this repository
+
+- Included: the taxonomy, the differential rates, the cross-engine comparison,
+  the sandboxed AgentDojo reproductions, and the `policy_lint` fix.
+- Not included: anything aimed at a specific deployed agent.

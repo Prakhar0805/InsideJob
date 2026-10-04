@@ -1,0 +1,145 @@
+{
+  "engines": [
+    "progent",
+    "janus"
+  ],
+  "kind": "per-class presence profile (not a bypass rate)",
+  "rows": [
+    {
+      "gap_class": "A1_unanchored",
+      "note": "unanchored `pattern` admits a suffix",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "A2_raw_regex",
+      "note": "bare-string restriction is a regex; `.` is a wildcard",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "A3_type_scoped_noop",
+      "note": "`pattern` on an array is silently ignored",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "A4_format_unenforced",
+      "note": "`format` validated with no checker",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "A5_unconstrained_siblings",
+      "note": "unnamed sibling argument is never checked",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "B1_absent_arg_skip",
+      "note": "restriction on an absent argument is skipped",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "B2_fallback_leak",
+      "note": "fall-through default-deny read from the last rule's fallback",
+      "verdicts": {
+        "progent": true,
+        "janus": false
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "progent-only (janus fails closed)"
+    },
+    {
+      "gap_class": "B3_deny_fails_open",
+      "note": "erroring deny rule is dropped (throwing predicate)",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "B4_precedence_inversion",
+      "note": "policy-shape hazard: low-numbered broad allow shadows the deny (per-spec; no reference fix)",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": false,
+      "has_reference_fix": false,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "B5_no_policy_allows",
+      "note": "unset policy permits everything",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    },
+    {
+      "gap_class": "B6_subset_check_fails_open",
+      "note": "z3 narrowing check accepts a widened anchored pattern (Progent update path)",
+      "verdicts": {
+        "progent": true,
+        "janus": null
+      },
+      "reference_denies": null,
+      "has_reference_fix": false,
+      "label": "progent-only (no such path in janus)"
+    },
+    {
+      "gap_class": "T1_tool_coercion",
+      "note": "numeric deny rule never matches the string the tool will coerce to 5000.0",
+      "verdicts": {
+        "progent": true,
+        "janus": true
+      },
+      "reference_denies": true,
+      "has_reference_fix": true,
+      "label": "propagated"
+    }
+  ],
+  "notes": [
+    "Janus reimplements Progent's design: its generation prompt is Progent's SYS_PROMPT verbatim and its generator emits the same (100, 0, args, 0) rules. 'propagated' therefore means the gap lives in the shared primitives, not that two teams converged on it independently.",
+    "Both engines ship a dormant A3 detector that never runs on the generated-policy path: Progent's secagent.tool.security_policy_type_check is a stub whose check call is commented out; Janus's validate_schema runs only in loader.validate_policy, and generator.py builds rules without calling it."
+  ]
+}

@@ -1,74 +1,89 @@
-# InsideJob — Paper Guardrails
+# InsideJob
 
-**"Deterministic" LLM-agent guardrails are audited on whether the *agent* can be fooled. That's the wrong test. We audit what the *enforcer admits* — and the admitted set is systematically larger than the policy appears to describe. The core result runs in seconds, with no GPU, no model, and no API key.**
+An offline audit of what "policy-as-code" guardrails for LLM agents actually enforce.
 
----
+Progent and Janus secure an agent by having an LLM write a least-privilege policy and then checking every tool call against it in deterministic code. Most evaluations of this design ask whether a prompt injection can talk the agent into a bad call. I ask a narrower question about the enforcement code itself: is the set of calls the matcher admits the same as the set the policy was meant to allow?
 
-## The one-paragraph version
+It is not always the same, and the difference can be measured without running an agent. The core result needs no GPU, no model and no API key, and reproduces in under a minute.
 
-Progent (UC Berkeley), Janus, and the whole "policy-as-code for agents" family share a design: **an LLM writes a least-privilege policy, and deterministic code enforces it** on every tool call. The pitch is "the enforcer is code, so it can't be prompt-injected." But that guards the wrong boundary. The policy *describes* an intended set of allowed argument values; the matcher *admits* a different, larger set. That gap is a **parser differential** — the same bug class behind CouchDB CVE-2017-12635 and the GitLab SAML 2025 auth bypass — and nobody had pointed it at agent guardrails. We characterize it, prove it reaches real harm on AgentDojo's own tasks, show it holds across two independently-built engines, and ship a linter that closes the part a policy rewrite can reach.
+## Background
 
-## What we found (all reproducible offline)
+[Progent](https://arxiv.org/abs/2504.11703) (UC Berkeley) introduced programmable privilege control for agents: per tool, a list of rules whose conditions are JSON Schema fragments over the arguments. Janus (`janus-guard` on PyPI) reimplements the same design with its own enforcer code. I think this is the right architecture. Putting the security decision in code rather than in a model is what makes it possible to audit at all, and this project is an attempt to do that audit carefully.
 
-- **The matcher admits a strict superset of the policy.** Across the 95 policy-relevant string arguments in the four AgentDojo domains — 380 policy fragments, one per (argument × idiom) — every flawed-but-natural idiom is **100% bypassable**; the one sound idiom (an exact `enum`) is **0%**. 760 labelled gap instances.
-- **`pattern` is unanchored** (`re.search`): `pattern:"GB29NWBK…"` also admits `GB29NWBK…-ATTACKER`. Progent's bare-string branch uses `re.match` — prefix-only.
-- **Schema keywords are silently ignored off-type**: `{"type":"array","pattern":"^emma@corp.com$"}` enforces *nothing* — and Progent's own prompt warns the LLM about this, which means they know the model gets it wrong.
-- **`format` is recommended to the policy LLM and never enforced.** **Deny rules fail open** — any error evaluating a forbid rule deletes it. **"Default deny" isn't even a construct** — it's governed by the last rule's fallback field.
-- **The engine leaks its own boundary**: every denial hands the agent the exact allowed-value set (`'DE89…' is not one of ['GB29…']`).
-- **Harm is scored by the benchmark, never by us.** An admitted call only counts when AgentDojo's own state-based `security()` predicate confirms it achieves the attacker's objective; the oracle is calibrated on all 25/25 injection tasks. Two structural bypasses are demonstrated end-to-end this way. The committed sweep (`results/phase_b_harm/`) uses a deliberately conservative baseline that pins *every* argument to its exact benign value, and correctly reports **0 bypasses** — exact pinning is sound, which is the point. The gaps bite where real policies are looser.
-- **A fix, with its cost measured for free.** The taxonomy splits: **A1–A4 close by rewriting the policy alone — 100% of legitimate tasks preserved.** A5 and the control-flow gaps are matcher behaviors that need the engine to adopt strict semantics; closing A5 by denying unnamed arguments costs ~12% utility. Every number is computed with zero API calls.
+The observation is that a policy passes through two readers. The LLM (or a human) writes `pattern: "GB29NWBK..."` and means "this IBAN". The matcher hands that to `jsonschema`, where `pattern` is an unanchored `re.search`, so `GB29NWBK...-ATTACKER` also passes. This is a parser differential, the same kind of bug behind CouchDB CVE-2017-12635: two components read the same input and disagree about what it means. I am not aware of earlier work that looks at agent policy engines this way, but I may have missed some.
 
-## Reproduce it in seconds
+## What I found
+
+All of this is reproducible offline. The full write-up is in [`writeup/FINDINGS.md`](writeup/FINDINGS.md).
+
+**The matcher admits more than the policy says, for common ways of writing a constraint.** The sweep covers the 95 policy-relevant string arguments in AgentDojo's four suites, each written four ways (380 policy fragments). The three loose idioms (a pinned `pattern`, a `pattern` with no `type`, a bare `format`) are bypassable in every case. The exact `enum` is never bypassable. So the result is about how constraints get written, not a claim that the engine cannot enforce anything.
+
+**The gaps fall into a small taxonomy**, each class pinned by a regression test:
+
+- A1 to A5, matcher semantics: unanchored patterns, restrictions compiled as regex (so `.` is a wildcard), schema keywords that are silently ignored on the wrong type, `format` never checked, and arguments the policy does not name left unconstrained.
+- B1 to B6, control flow: a restriction on an absent argument is skipped, the default-deny is read from the last rule's fallback field, a forbid rule that raises is dropped, and a few more.
+- T1, tool side: the matcher checks the raw argument, then the tool's pydantic signature coerces it, so the value that was judged is not the value that runs.
+- C1, disclosure: a denial returns the failing schema fragment to the agent, including the permitted value.
+
+**Some admitted calls reach real harm, scored by the benchmark.** A bypass only counts when AgentDojo's own `security()` predicate says the attacker's goal was achieved. Seven email cases pass that bar: a policy that pins `recipients` to a benign address also admits `"benign@corp.com" <attacker@evil.com>`, because the matcher finds the benign address by search while `send_email`'s `EmailStr` parser delivers to the other one. Two more structural cases (a loose URL pattern and an unconstrained sibling argument) are validated the same way. Three URL cases are reported separately as modeled, because AgentDojo has no URL parser to score them against.
+
+**Most of it carries over to Janus.** The classes that come from shared primitives (`jsonschema.validate`, `re.match`, `if arg in kwargs`) appear in both engines. Progent's fallback behaviour (B2) does not appear in Janus, and one flavour of B3 fails closed there. `python -m gapfuzz crossengine` prints the per-class comparison.
+
+**Part of it can be fixed without touching the engine.** `policy_lint` rewrites a policy to anchor patterns, add missing types and replace unenforced formats. That closes A1 to A4, and all 96 AgentDojo user tasks still pass their own ground-truth calls. Closing A5 (denying unnamed arguments) has to happen in the matcher and costs about 12% of tasks.
+
+**On real generated policies the picture is milder.** I generated policies with Progent's own prompt on Groq's free tier. In the 55 `openai/gpt-oss-120b` policies evaluated so far, the model mostly writes exact `enum` constraints for identifiers, and only 1 of 55 is bypassable at the value level. What remains is A5: 21 of 55 policies leave sibling arguments unconstrained.
+
+## Reproduce
 
 ```bash
-python -m venv .venv && . .venv/Scripts/activate     # ../bin/activate on POSIX
+python -m venv .venv && . .venv/Scripts/activate     # .venv/bin/activate on Linux/macOS
 pip install -e ./agentdojo -e ./progent && pip install -r requirements.txt
 
-python -m gapfuzz audit --enforcer progent           # the differential result
-python -m gapfuzz audit --enforcer strict            # self-consistency: 0 gaps
-python -m gapfuzz harm  --enforcer progent           # reachable-harm sweep
-python -m pytest                                     # 131 tests; the taxonomy is pinned here
+python -m gapfuzz audit --enforcer progent     # the differential sweep
+python -m gapfuzz audit --enforcer strict      # sanity check: the reference against itself, 0 gaps
+python -m gapfuzz harm --enforcer progent      # reachable-harm sweep
+python -m gapfuzz semantic --enforcer progent  # matcher vs the tool's own parser
+python -m gapfuzz crossengine                  # Progent vs Janus, per class
+python -m pytest                               # 181 tests
 ```
 
-No `.env`, no API key, no cost. Every gap in `tests/test_enforcement_gaps.py` is written as *"the real engine allows X, a sound matcher denies X"* — so the day one starts failing is the day the gap was fixed upstream.
+No `.env` is needed for any of these. Each test in `tests/test_enforcement_gaps.py` is written as "the real engine allows X, a sound matcher denies X", so if a gap is fixed upstream the matching test starts failing.
 
-## How it's built
+## How it works
 
-| Path | What |
+| Path | What it does |
 |---|---|
-| `src/enforcers/base.py` | the `EnforcerAdapter` protocol + the `GapClass` taxonomy (A1–A5, B1–B5) |
-| `src/enforcers/strict.py` | the sound reference matcher, parameterized by which gaps it fixes (so each disagreement attributes to one class) |
-| `src/enforcers/progent.py` | adapter over the real `secagent` engine, unmodified |
-| `src/enforcers/janus.py` | adapter over `janus-guard` — the cross-engine check |
-| `src/gapfuzz/` | mutation operators, the bypass search, and the two sweeps; `python -m gapfuzz` |
-| `src/harm_oracle.py` | zero-LLM oracle over AgentDojo's own `security()` state predicates |
-| `src/policy_lint.py` | detect + repair gaps; splits policy-fixable (A1–A4) from engine-level (A5, B*) |
-| `src/utility_cost.py` | free false-positive measurement of the hardening |
-| `agentdojo/`, `progent/` | vendored upstream, **unmodified** (see `VENDOR.md`) |
+| `src/enforcers/base.py` | the `EnforcerAdapter` protocol and the gap taxonomy |
+| `src/enforcers/strict.py` | a sound reference matcher; each fix can be switched on separately, which is how a gap gets attributed to one class |
+| `src/enforcers/progent.py`, `janus.py` | thin adapters over the real engines, called through their public APIs |
+| `src/gapfuzz/` | mutation operators, the bypass search and the sweeps (`python -m gapfuzz`) |
+| `src/harm_oracle.py` | runs a call in a fresh AgentDojo sandbox and asks the task's `security()` predicate |
+| `src/tool_semantics.py` | models how each tool parses its arguments (emails, URLs, IBANs) |
+| `src/policy_lint.py` | detects the gaps and repairs the ones a policy rewrite can reach |
+| `src/utility_cost.py` | measures how many legitimate tasks survive the hardening |
+| `src/policy_corpus.py` | generates policies with Progent's prompt; the only code that calls an API |
+| `agentdojo/`, `progent/` | vendored upstream, unmodified (see `VENDOR.md`) |
 
-The design rule that makes the cross-engine claim cheap: **`gapfuzz` never imports `secagent` or `janus`** — everything engine-specific is behind `EnforcerAdapter`. Swapping the engine under test is a one-line change.
+`gapfuzz` never imports `secagent` or `janus` directly. Everything engine-specific sits behind `EnforcerAdapter`, so adding a third engine means writing one adapter.
 
-## What a reported bypass has to clear
+A reported bypass has to clear three checks:
 
-Three gates, never fewer:
+1. The real engine admits the call.
+2. The strict reference rejects it. Otherwise the policy is simply too broad, which is not an enforcement gap.
+3. AgentDojo's `security()` predicate confirms the attacker's goal in a freshly executed sandbox.
 
-1. **Admitted** by the real engine's matcher.
-2. **Rejected** by the strict reference (else it's a too-broad policy, not an enforcement gap).
-3. **Harmful** — AgentDojo's `security()` predicate confirms the call achieves the injection task's objective in a freshly-executed sandbox.
+Every run also asserts that the reference never admits a call the engine denies. If that ever fails, the reference is wrong and the numbers should not be trusted.
 
-And a global invariant, asserted in every run: the strict reference never admits what the engine denies. If it did, the reference would be wrong — so this guards the validity of every number.
+## Limitations
 
-## Honest scope
+- The 100% and 0% rates come from policies I constructed to isolate each idiom. They show what the matcher does with a given idiom, not how often a model writes that idiom. The generated-policy study above is the first look at prevalence. It covers one model and three suites so far.
+- Only A1, A3 and A4 are measured at scale by the sweep, and C1 by the disclosure probe. The other nine classes are each pinned by a hand-built regression test. The sweep varies one string argument against one policy shape, so it cannot express them yet.
+- The harm results are existence proofs on AgentDojo, not prevalence estimates.
+- The strict reference is my own reading of what a policy "means". Where that reading is debatable (B4, rule priority order, is the engine's documented behaviour), the class is reported as a policy-shape hazard and not counted as an engine bug.
+- This looks at one layer of one design. It says nothing about prompt injection in general.
 
-This characterizes **one** enforcement-layer weakness and fixes part of it. It does not "solve" prompt injection.
+## Status
 
-Two scope boundaries stated plainly, because both are easy to overstate:
+These findings have not been reported to the Progent or Janus maintainers yet. `writeup/DISCLOSURE.md` has the per-engine notes I intend to send. Everything here runs inside AgentDojo's sandbox against synthetic tasks. Nothing targets a deployed system.
 
-- **Constructed, not generated, policies.** Every number above comes from policies we construct to model the documented generation behaviour. The bypass rate on *real LLM-written* policies is Phase C — **specified, not yet implemented**; it is the only step that would need an API key.
-- **Three of eleven taxonomy classes are produced by the automated sweep** (A1, A3, A4). The other eight are pinned by differential regression tests rather than swept, because the corpus generates a single policy shape. See `writeup/FINDINGS.md` §3 for the coverage table and the reason.
-
-The systems under test are real open-source projects. **Disclosure precedes publication**: drafts to both maintainer teams are in `writeup/DISCLOSURE.md` and have **not yet been sent** — that gate is open, and this repo is not public until it closes (see `CLAUDE.md` §11).
-
-## Origins
-
-This began as an adaptive-attack study against Progent; that brief is preserved in `CLAUDE.old.md`. It was abandoned because it needed a full agent rollout per data point — months of free-tier budget for an underpowered result. Auditing the matcher instead answers the same question ("does the defense actually hold?") more sharply, for free.
+The project started as an adaptive prompt-injection study against Progent. I dropped that framing because it needed a full agent rollout per data point, which a free-tier budget cannot support, and because auditing the matcher directly gives exact answers.

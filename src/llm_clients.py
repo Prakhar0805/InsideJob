@@ -1,26 +1,19 @@
-"""OpenAI-compatible clients for Groq / Google AI Studio, with free-tier care.
+"""OpenAI-compatible clients for Groq / Google AI Studio, paced for free tiers.
 
-Both providers speak the OpenAI wire protocol, which lets us reuse AgentDojo's
-existing ``OpenAILLM`` pipeline element for the agent role rather than writing a
-new one. That matters for comparability: a bug in a hand-rolled provider adapter
-would show up as a change in agent behaviour and be indistinguishable from a
-change in defence strength.
-
-Everything here exists to satisfy the $0 ceiling in CLAUDE.md section 6. Three
-facts about real free tiers shape the design:
+Only the generated-policy study (:mod:`src.policy_corpus`) makes API calls, and
+it has a $0 budget. Three facts about real free tiers shape the design:
 
 1.  **Tokens per minute bind long before requests per minute.** Groq's free tier
-    allows 30 requests/min but only ~8k tokens/min on the models we can use, and
-    a single AgentDojo agent call carries thousands of tokens of tool schema. A
-    request-counting limiter would let ~30 calls/min through and collect 429s.
-    So the gate meters *estimated tokens* as well as requests.
+    allows 30 requests/min but only ~8k tokens/min on the models used here, and
+    a policy-generation prompt carries thousands of tokens of tool schema. A
+    request-counting limiter would let ~30 calls/min through and collect 429s,
+    so the gate meters *estimated tokens* as well as requests.
 2.  **Quotas are per model, not per provider.** Each Groq model has its own
-    bucket, so keying the limiter by provider would needlessly serialise three
-    independent budgets into one.
+    bucket, so the limiter is keyed by model.
 3.  **Daily caps exist and cannot be waited out.** A tokens-per-day 429 will not
     clear for hours, so retrying against it just burns the run. Those are
-    detected and raised as :class:`DailyQuotaExhausted` so the sweep can stop
-    cleanly and be resumed tomorrow (results already written are preserved).
+    detected and raised as :class:`DailyQuotaExhausted` so generation can stop
+    cleanly and be resumed the next day (results already written are kept).
 """
 
 from __future__ import annotations
@@ -66,8 +59,7 @@ class RateLimiter:
     is precisely when free tiers push back hardest. Sliding windows over the last
     60 seconds of requests and of estimated tokens cost nothing and never burst.
 
-    Thread-safe because a sweep may fan out while a single model budget still has
-    to be respected globally.
+    Thread-safe, so one model's budget is respected even if callers fan out.
     """
 
     def __init__(
@@ -192,8 +184,8 @@ class CallStats:
 class ModelHandle:
     """A configured client plus the limiter and counters for one *model*.
 
-    Per model, not per provider: free-tier quotas are metered per model, so three
-    roles on three different models get three independent budgets.
+    Per model, not per provider: free-tier quotas are metered per model, so two
+    models get two independent budgets.
     """
 
     spec: ModelSpec
@@ -244,9 +236,8 @@ def all_stats() -> dict[str, dict[str, float | int]]:
 def estimate_tokens(kwargs: dict) -> int:
     """Pre-estimate a chat-completion request's total token cost.
 
-    Serialising the whole payload catches what dominates AgentDojo calls: the
-    tool schemas, which are re-sent in full on every turn. Output is added
-    because it counts toward the same budget.
+    Serialising the whole payload catches what dominates these prompts: the
+    tool schemas. Output is added because it counts toward the same budget.
     """
     try:
         payload = json.dumps(
@@ -272,9 +263,8 @@ def _is_daily_limit(exc: Exception) -> bool:
 class RateLimitedClient:
     """Thin proxy over ``openai.OpenAI`` that paces and retries every request.
 
-    AgentDojo's ``OpenAILLM`` only ever touches ``client.chat.completions.create``,
-    so proxying that one path is enough and keeps the surface small. Presenting
-    the same attribute chain means AgentDojo needs no changes at all.
+    Callers only ever touch ``client.chat.completions.create``, so proxying that
+    one path is enough and keeps the surface small.
     """
 
     def __init__(self, handle: ModelHandle, max_attempts: int = 6, base_delay: float = 2.0) -> None:
@@ -283,7 +273,7 @@ class RateLimitedClient:
         self._base_delay = base_delay
         self.chat = _Chat(self)
 
-    # Some AgentDojo code paths read ``client.api_key`` / pass the client on.
+    # Everything else (``api_key`` and so on) falls through to the real client.
     def __getattr__(self, item: str):
         return getattr(self._handle.client, item)
 
@@ -309,7 +299,7 @@ class RateLimitedClient:
                     raise DailyQuotaExhausted(
                         f"{self._handle.spec} hit a per-DAY quota: {exc}. "
                         "Stop here and resume tomorrow - already-written results are kept "
-                        "and re-running skips completed cases."
+                        "and re-running skips completed tasks."
                     ) from exc
                 delay = self._retry_after(exc) or self._base_delay * (2 ** (attempt - 1))
                 logger.warning(
@@ -374,32 +364,3 @@ class _Completions:
 def build_client(spec: ModelSpec) -> RateLimitedClient:
     """Public entry point: a paced, retrying client for ``spec``."""
     return RateLimitedClient(get_handle(spec))
-
-
-def simple_completion(
-    spec: ModelSpec,
-    system_prompt: str,
-    user_prompt: str,
-    *,
-    temperature: float = 1.0,
-    max_tokens: int = 2048,
-) -> str:
-    """One-shot text completion. Used by the attacker, which needs no tools.
-
-    Temperature defaults high on purpose: the attacker's job is to explore a
-    space of phrasings, and a deterministic attacker would re-propose the same
-    blocked payload every round, which is exactly the static baseline we are
-    trying to improve on.
-    """
-    client = build_client(spec)
-    completion = client.chat.completions.create(
-        model=spec.model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    content = completion.choices[0].message.content
-    return content or ""

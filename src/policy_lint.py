@@ -53,7 +53,8 @@ POLICY_FIXABLE_GAPS: frozenset[GapClass] = frozenset(
 
 #: Gaps that are *matcher behaviours*, not policy content: no policy rewrite can
 #: close them, because the engine's own control flow (skipping unlisted args,
-#: loop-carried fallback, fail-open deny) overrides whatever the policy says.
+#: loop-carried fallback, fail-open deny, fail-open update analysis, matching
+#: the raw value the tool will not execute) overrides whatever the policy says.
 #: Closing these requires the engine to adopt strict semantics - i.e. deploy the
 #: linter's matcher, or patch the engine. This split is a headline result: the
 #: cheap fix only reaches half the taxonomy.
@@ -63,10 +64,20 @@ ENGINE_LEVEL_GAPS: frozenset[GapClass] = frozenset(
         GapClass.B1_ABSENT_ARG_SKIP,
         GapClass.B2_FALLBACK_LEAK,
         GapClass.B3_DENY_FAILS_OPEN,
-        GapClass.B4_PRECEDENCE_INVERSION,
         GapClass.B5_NO_POLICY_ALLOWS,
+        GapClass.B6_SUBSET_CHECK_FAILS_OPEN,
+        GapClass.T1_TOOL_COERCION,
     }
 )
+
+#: Hazards of the policy's *shape* rather than of any single restriction. The
+#: engine is doing exactly what its priority semantics say; the policy is
+#: arranged so that those semantics defeat its own intent (a broad low-numbered
+#: allow that shadows a specific deny). Nothing to fix in a matcher - the
+#: strict reference orders rules the same way - so these live outside
+#: `strict.ALL_FIXES` and are reported here, where the whole rule list is in
+#: scope, as the only place they can be seen.
+POLICY_SHAPE_HAZARDS: frozenset[GapClass] = frozenset({GapClass.B4_PRECEDENCE_INVERSION})
 
 
 @dataclass(frozen=True)
@@ -111,13 +122,22 @@ class LintReport:
     def engine_level(self) -> list[LintFinding]:
         return [f for f in self.findings if f.gap_class in ENGINE_LEVEL_GAPS]
 
+    @property
+    def policy_shape(self) -> list[LintFinding]:
+        return [f for f in self.findings if f.gap_class in POLICY_SHAPE_HAZARDS]
+
     def render(self) -> str:
         if self.clean:
             return "policy_lint: no enforcement-gap issues found."
         lines = [f"policy_lint: {len(self.findings)} issue(s)"]
         for f in self.findings:
             where = f"{f.tool_name}.{f.arg_name}" if f.arg_name else f.tool_name
-            tier = "policy-fixable" if f.gap_class in POLICY_FIXABLE_GAPS else "ENGINE-level"
+            if f.gap_class in POLICY_FIXABLE_GAPS:
+                tier = "policy-fixable"
+            elif f.gap_class in POLICY_SHAPE_HAZARDS:
+                tier = "policy-shape hazard"
+            else:
+                tier = "ENGINE-level"
             lines.append(f"  [{f.gap_class.value}] ({tier}) {where}: {f.detail}")
         if self.engine_level:
             lines.append(
@@ -167,7 +187,44 @@ def lint_policy(policy: Policy) -> LintReport:
             for arg_name, restriction in conditions.items():
                 report.findings.extend(_lint_restriction(tool_name, arg_name, restriction))
 
+        # Shape hazards need the whole rule list, not one rule at a time.
+        report.findings.extend(_lint_precedence(tool_name, rules))
+
     return report
+
+
+def _lint_precedence(tool_name: str, rules: list) -> list[LintFinding]:
+    """B4: a broad low-numbered allow that shadows a deny (policy-shape hazard).
+
+    Both engines sort a tool's rules by ascending priority number and return on
+    the first allow whose conditions hold. An unconditional allow with a lower
+    number than a deny therefore guarantees the deny can never fire - the
+    engine is honouring its documented precedence, and the policy has arranged
+    that precedence against itself. No matcher fix applies (the strict reference
+    orders rules the same way), which is why this is reported here and not
+    closed by `harden_policy`. Every rule the policy LLM emits lands at priority
+    100 (`secagent/tool.py:401-405`), so the hazard is specifically a
+    hand-written allow at a lower number combined with any deny at a higher one.
+    """
+    findings: list[LintFinding] = []
+    parsed = [(r[0], r[1], r[2]) for r in rules if len(r) >= 4]
+    denies = [(p, c) for p, e, c in parsed if e == 1]
+    if not denies:
+        return findings
+    for a_priority, a_effect, a_conditions in parsed:
+        if a_effect != 0 or a_conditions:
+            continue
+        shadowed = sorted(p for p, _ in denies if p > a_priority)
+        if shadowed:
+            findings.append(
+                LintFinding(
+                    GapClass.B4_PRECEDENCE_INVERSION, tool_name, None,
+                    f"unconditional allow at priority {a_priority} precedes deny rule(s) at "
+                    f"priority {shadowed}; the engine evaluates lower numbers first and returns "
+                    "on the first matching allow, so those denies can never fire",
+                )
+            )
+    return findings
 
 
 def _lint_restriction(tool_name: str, arg_name: str, restriction: Any) -> list[LintFinding]:
@@ -258,18 +315,49 @@ def _lint_restriction(tool_name: str, arg_name: str, restriction: Any) -> list[L
             )
         )
 
+    # A pattern written for a list or object argument lives one level down. A
+    # linter that stopped at the top level would pass exactly the array policy
+    # Progent's own prompt tells the model to write.
+    for label, nested in _nested_schemas(restriction):
+        findings.extend(_lint_restriction(tool_name, f"{arg_name}.{label}", nested))
+
     return findings
+
+
+def _nested_schemas(schema: dict) -> list[tuple[str, dict]]:
+    """(label, sub-schema) for every nested schema position a policy uses."""
+    out: list[tuple[str, dict]] = []
+    items = schema.get("items")
+    if isinstance(items, dict):
+        out.append(("items", items))
+    elif isinstance(items, list):
+        out.extend((f"items[{i}]", s) for i, s in enumerate(items) if isinstance(s, dict))
+    for key, sub in (schema.get("properties") or {}).items():
+        if isinstance(sub, dict):
+            out.append((f"properties.{key}", sub))
+    if isinstance(schema.get("additionalProperties"), dict):
+        out.append(("additionalProperties", schema["additionalProperties"]))
+    for key in ("anyOf", "allOf", "oneOf"):
+        out.extend((f"{key}[{i}]", s) for i, s in enumerate(schema.get(key, []) or []) if isinstance(s, dict))
+    return out
 
 
 def harden_policy(policy: Policy, *, deny_unknown_args: bool = True) -> Policy:
     """Return a tightened copy of `policy` that closes the gaps.
 
-    Never loosens: patterns are anchored, missing types inferred, unenforceable
-    formats backed by a pattern, objects closed to extra keys. The result is
-    meant to be enforced by the same engine, whose matcher will now admit only
-    what the author intended. `deny_unknown_args` additionally rewrites empty
-    object schemas to forbid unnamed keys (the A5 fix with a false-positive
-    cost).
+    Never loosens: patterns are anchored (at every nesting depth), missing
+    types inferred, unenforceable formats backed by a pattern, objects closed
+    to extra keys. The result is meant to be enforced by the same engine, whose
+    matcher will now admit only what the author intended. `deny_unknown_args`
+    additionally rewrites empty object schemas to forbid unnamed keys (the A5
+    fix with a false-positive cost).
+
+    One engine-specific caveat (B6): under Progent's optional
+    ``SECAGENT_ONLY_ALLOW_NARROW`` mode, the z3 policy-narrowing check cannot
+    translate ``^``/``$``/``\\A``/``\\Z`` anchors and swallows the failure as
+    "subset holds", so an anchored (hardened) policy silently disables that
+    check. That is a fault in the analysis, not in anchoring; the fix belongs
+    in the engine, which is why no lint rule discourages anchoring.
     """
     if policy is None:
         return None
@@ -317,6 +405,25 @@ def _harden_restriction(restriction: Any, deny_unknown_args: bool) -> Any:
         out.setdefault("type", "string")
     if out.get("type") == "object" and deny_unknown_args:
         out.setdefault("additionalProperties", False)
+
+    # Harden nested schemas the same way, so an `items.pattern` (the array
+    # idiom) is anchored rather than left as the one loophole.
+    if isinstance(out.get("items"), dict):
+        out["items"] = _harden_restriction(out["items"], deny_unknown_args)
+    elif isinstance(out.get("items"), list):
+        out["items"] = [
+            _harden_restriction(s, deny_unknown_args) if isinstance(s, dict) else s for s in out["items"]
+        ]
+    if isinstance(out.get("properties"), dict):
+        out["properties"] = {
+            k: (_harden_restriction(v, deny_unknown_args) if isinstance(v, dict) else v)
+            for k, v in out["properties"].items()
+        }
+    for key in ("anyOf", "allOf", "oneOf"):
+        if isinstance(out.get(key), list):
+            out[key] = [
+                _harden_restriction(s, deny_unknown_args) if isinstance(s, dict) else s for s in out[key]
+            ]
     return out
 
 

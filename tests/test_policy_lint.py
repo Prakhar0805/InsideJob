@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.enforcers.base import GapClass
+from src.enforcers.base import PERMISSIVE_GAPS, GapClass
 from src.enforcers.strict import StrictEnforcer
+from src.enforcers.strict import ALL_FIXES
 from src.policy_lint import (
     ENGINE_LEVEL_GAPS,
     POLICY_FIXABLE_GAPS,
+    POLICY_SHAPE_HAZARDS,
     harden_policy,
     lint_policy,
 )
@@ -97,9 +99,69 @@ def test_hardening_restores_default_deny_on_bad_fallback():
 
 
 def test_gap_partition_is_complete_and_disjoint():
-    """Every gap class is either policy-fixable or engine-level, never both."""
-    assert POLICY_FIXABLE_GAPS.isdisjoint(ENGINE_LEVEL_GAPS)
-    assert POLICY_FIXABLE_GAPS | ENGINE_LEVEL_GAPS == set(GapClass)
+    """Every *admittance* gap is in exactly one of three tiers.
+
+    policy-fixable (a rewrite closes it), engine-level (the matcher must
+    change), or policy-shape hazard (the engine is honouring its documented
+    semantics against a badly arranged policy; only detectable, not
+    repairable). The partition is over `PERMISSIVE_GAPS`, not the whole enum.
+    C1 (boundary disclosure) is a property of the denial path rather than of
+    what the matcher admits, so the question does not apply to it. It is
+    asserted absent below so that adding it to a tier by reflex would fail
+    loudly.
+    """
+    tiers = (POLICY_FIXABLE_GAPS, ENGINE_LEVEL_GAPS, POLICY_SHAPE_HAZARDS)
+    for i, a in enumerate(tiers):
+        for b in tiers[i + 1:]:
+            assert a.isdisjoint(b)
+    assert POLICY_FIXABLE_GAPS | ENGINE_LEVEL_GAPS | POLICY_SHAPE_HAZARDS == set(PERMISSIVE_GAPS)
+    assert GapClass.C1_BOUNDARY_DISCLOSURE not in set().union(*tiers)
+
+
+def test_shape_hazards_have_no_reference_fix():
+    """A shape hazard is detected by lint and *not* claimed as fixed by the reference."""
+    assert POLICY_SHAPE_HAZARDS == {GapClass.B4_PRECEDENCE_INVERSION}
+    assert POLICY_SHAPE_HAZARDS.isdisjoint(ALL_FIXES)
+    assert GapClass.B6_SUBSET_CHECK_FAILS_OPEN in ENGINE_LEVEL_GAPS
+    assert GapClass.B6_SUBSET_CHECK_FAILS_OPEN not in ALL_FIXES
+
+
+def test_detects_precedence_inversion_as_shape_hazard():
+    """B4: a broad low-numbered allow that shadows a higher-numbered deny."""
+    policy = {"t": [(1, 0, {}, 0), (100, 1, {"to": {"type": "string"}}, 0)]}
+    report = lint_policy(policy)
+    assert GapClass.B4_PRECEDENCE_INVERSION.value in report.by_class()
+    assert report.policy_shape
+    assert "policy-shape hazard" in report.render()
+    # The same two rules the other way round are fine: the deny is reached first.
+    fine = {"t": [(100, 0, {}, 0), (1, 1, {"to": {"type": "string"}}, 0)]}
+    assert GapClass.B4_PRECEDENCE_INVERSION.value not in lint_policy(fine).by_class()
+
+
+def test_lint_reaches_nested_items_pattern():
+    """The array idiom keeps its pattern under `items`; lint must look there."""
+    policy = {"send_email": [(100, 0, {"recipients": {"type": "array", "items": {"type": "string", "pattern": "emma@corp.com"}}}, 0)]}
+    report = lint_policy(policy)
+    assert any(
+        f.gap_class is GapClass.A1_UNANCHORED and f.arg_name == "recipients.items" for f in report.findings
+    )
+
+
+def test_hardening_anchors_nested_items_pattern():
+    """Hardening must anchor a nested pattern, or the array idiom stays open.
+
+    Before nested anchoring, a `recipients` policy whose `items.pattern` was a
+    pasted benign address admitted the display-name form
+    `'"benign" <attacker>'` - and so did the strict reference. That value is
+    what the tool's own email parser resolves to the attacker.
+    """
+    benign = "emma@bluesparrowtech.com"
+    smuggled = f'"{benign}" <mark.black-2134@gmail.com>'
+    policy = {"send_email": [(100, 0, {"recipients": {"type": "array", "items": {"type": "string", "pattern": benign}}}, 0)]}
+    hardened = harden_policy(policy)
+    strict = StrictEnforcer()
+    assert strict.would_allow(hardened, "send_email", {"recipients": [benign]}).allowed
+    assert not strict.would_allow(hardened, "send_email", {"recipients": [smuggled]}).allowed
 
 
 def test_report_separates_the_two_tiers():

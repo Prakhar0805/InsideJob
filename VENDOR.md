@@ -2,16 +2,16 @@
 
 Both dependencies are **vendored, not modified**. They are checked in at a
 pinned commit so results stay reproducible and so anyone can diff our tree
-against upstream to confirm we did not quietly patch the defense or the
-scoring (CLAUDE.md §11).
+against upstream to confirm that neither the defense nor the scoring was
+patched.
 
 | Directory | Upstream | Commit | Date |
 |---|---|---|---|
 | `progent/` | https://github.com/sunblaze-ucb/progent | `8a8eb894b9d568a32b4e58252fea85b47f789c77` | 2026-05-13 |
 | `agentdojo/` | same repo, `agentdojo/` subdirectory (Progent's instrumented fork of https://github.com/ethz-spylab/agentdojo, v0.1.29) | `8a8eb894b9d568a32b4e58252fea85b47f789c77` | 2026-05-13 |
 
-`agentdojo/` was moved from `progent/agentdojo/` to the top level to match the
-repository layout in CLAUDE.md §7. Its contents are byte-identical to upstream.
+`agentdojo/` was moved from `progent/agentdojo/` to the top level. Its contents
+are byte-identical to upstream.
 
 ## Verifying we did not modify them
 
@@ -23,8 +23,8 @@ diff -r --exclude=agentdojo /tmp/progent-upstream <repo>/progent
 ```
 
 Both diffs should be empty apart from `.git/` and build artifacts. If either is
-not empty, that is a bug — CLAUDE.md §11 forbids modifying AgentDojo's scoring
-and Progent's policy engine. Everything InsideJob adds lives in `src/`.
+not empty, that is a bug: this project does not modify AgentDojo's scoring or
+Progent's policy engine. Everything InsideJob adds lives in `src/`.
 
 ## Why Progent's AgentDojo fork rather than stock AgentDojo
 
@@ -42,5 +42,5 @@ sit between the agent and tool execution. The hooks are:
   `SECAGENT_UPDATE=True`.
 - `agentdojo/src/agentdojo/benchmark.py` — resets the policy between tasks.
 
-Using stock AgentDojo instead would mean re-deriving those hooks ourselves,
-which is exactly the kind of reimplementation CLAUDE.md §6 rules out.
+Using stock AgentDojo instead would mean re-deriving those hooks, and a
+reimplementation of the system under test is what this project avoids.

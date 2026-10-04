@@ -38,8 +38,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
-from src.enforcers.base import GapClass, PERMISSIVE_GAPS, Policy
-from src.enforcers.strict import ALL_FIXES, StrictEnforcer
+from src.enforcers.base import GapClass, Policy
+from src.enforcers.strict import ALL_FIXES, StrictEnforcer, ToolSchemas
 
 #: How attribution reached its verdict. Carried on every result so a reviewer
 #: can tell an isolated finding from a tie-broken one at a glance.
@@ -51,11 +51,14 @@ AttributionMethod = Literal[
     "not-a-gap",  # baseline already denies, or the full reference admits: nothing to attribute
 ]
 
-#: The gaps attribution will probe, in enum-declaration order. Restricted to the
-#: *permissive* classes (the ones a StrictEnforcer actually fixes); a
-#: disclosure-only class such as C1 is not an admittance gap and has no fix to
-#: isolate, so it is excluded here automatically once it joins the enum.
-_CANDIDATE_GAPS: tuple[GapClass, ...] = tuple(g for g in GapClass if g in PERMISSIVE_GAPS)
+#: The gaps attribution will probe, in enum-declaration order. Restricted to
+#: `ALL_FIXES` - the classes the reference has an actual fix for - rather than
+#: to every admittance class. The distinction matters: a class with no fix
+#: behind it (B4 until it was demoted, B6 by construction) probes identically
+#: to the no-fix baseline, so it can never be isolated and would only ever
+#: appear as noise in a leave-one-out pass. C1 is excluded for the same reason
+#: it is excluded from `ALL_FIXES`: it is not an admittance gap at all.
+_CANDIDATE_GAPS: tuple[GapClass, ...] = tuple(g for g in GapClass if g in ALL_FIXES)
 
 
 @dataclass(frozen=True)
@@ -70,25 +73,32 @@ class Attribution:
     candidates: frozenset[GapClass]
 
 
-#: Memoised probe enforcers, keyed on their fix set. Attribution builds ~20
-#: probes per candidate (one per fix, plus leave-one-out); without caching that
-#: is thousands of identical StrictEnforcer constructions across a sweep.
-_PROBES: dict[frozenset[GapClass], StrictEnforcer] = {}
+#: Memoised probe enforcers, keyed on (fix set, tool schemas). Attribution
+#: builds ~20 probes per candidate (one per fix, plus leave-one-out); without
+#: caching that is thousands of identical StrictEnforcer constructions across a
+#: sweep. `ToolSchemas` is a frozen value object, so equal schema sets share an
+#: entry and the memo is not defeated by passing a fresh instance per call.
+_PROBES: dict[tuple[frozenset[GapClass], ToolSchemas | None], StrictEnforcer] = {}
 
 
-def _probe(fixes: frozenset[GapClass]) -> StrictEnforcer:
-    """A reference with exactly `fixes` enabled.
+def _probe(fixes: frozenset[GapClass], schemas: ToolSchemas | None = None) -> StrictEnforcer:
+    """A reference with exactly `fixes` enabled (and, optionally, tool schemas).
 
     `deny_unknown_args` is held True on every probe so that only `fixes` varies.
     That is not the same as always-on A5: both A5 sites are additionally gated on
     `fixes_gap(A5)`, so with A5 absent from `fixes` the flag does nothing. Fixing
     it removes a confusing second knob from the isolation loop without changing
     any verdict (verified: the 760-instance distribution is unchanged).
+
+    `schemas` is threaded, never global: the value-level sweep runs without
+    schemas (so T1 is inert there, by design), while the harm and semantic
+    paths pass the suite's declared types so T1 can be isolated.
     """
-    enforcer = _PROBES.get(fixes)
+    key = (fixes, schemas)
+    enforcer = _PROBES.get(key)
     if enforcer is None:
-        enforcer = StrictEnforcer(fixes=fixes, deny_unknown_args=True)
-        _PROBES[fixes] = enforcer
+        enforcer = StrictEnforcer(fixes=fixes, deny_unknown_args=True, tool_schemas=schemas)
+        _PROBES[key] = enforcer
     return enforcer
 
 
@@ -98,6 +108,7 @@ def attribute(
     args: Mapping[str, Any],
     *,
     hypothesis: GapClass | None = None,
+    tool_schemas: ToolSchemas | None = None,
 ) -> Attribution:
     """Name the reference fix responsible for denying `(tool_name, args)`.
 
@@ -105,6 +116,8 @@ def attribute(
         policy, tool_name, args: the call to attribute.
         hypothesis: the operator's declared class, used only as the last-resort
             label when isolation is inconclusive.
+        tool_schemas: the tools' declared parameter types, when known. Without
+            them the T1 probe is a no-op and T1 can never be attributed.
 
     The passes run cheapest-first and short-circuit:
 
@@ -124,7 +137,7 @@ def attribute(
         back to the operator's `hypothesis`.
     """
     def denies(fixes: frozenset[GapClass]) -> bool:
-        return not _probe(fixes).would_allow(policy, tool_name, args).allowed
+        return not _probe(fixes, tool_schemas).would_allow(policy, tool_name, args).allowed
 
     # Pass 0 - guards.
     if denies(frozenset()):
@@ -153,6 +166,7 @@ def attribute_calls(
     calls: Sequence[Any],
     *,
     hypothesis: GapClass | None = None,
+    tool_schemas: ToolSchemas | None = None,
 ) -> Attribution:
     """Attribute a multi-call bypass to the first call the full reference rejects.
 
@@ -162,8 +176,10 @@ def attribute_calls(
     machinery, so the literal path and the mutated path now attribute by the same
     rule instead of two divergent ones.
     """
-    reference = _probe(ALL_FIXES)
+    reference = _probe(ALL_FIXES, tool_schemas)
     for call in calls:
         if not reference.would_allow(policy, call.function, call.args).allowed:
-            return attribute(policy, call.function, call.args, hypothesis=hypothesis)
+            return attribute(
+                policy, call.function, call.args, hypothesis=hypothesis, tool_schemas=tool_schemas
+            )
     return Attribution(None, "not-a-gap", frozenset())

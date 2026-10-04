@@ -1,8 +1,6 @@
-"""InsideJob - adaptive red-teaming of deterministic agent defenses.
+"""InsideJob - an offline audit of what LLM-agent policy enforcers admit.
 
-See CLAUDE.md for the research questions, scope boundaries, and pre-registered
-success criteria. Nothing in this package modifies AgentDojo's scoring or
-Progent's policy engine; both are vendored unmodified (see VENDOR.md).
+The matcher of a policy engine (Progent, Janus) is compared against a sound
+reference matcher; every disagreement is a labelled enforcement gap. AgentDojo
+and Progent are vendored unmodified (see VENDOR.md).
 """
-
-__version__ = "0.1.0"

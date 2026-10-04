@@ -35,7 +35,7 @@ from agentdojo.functions_runtime import FunctionCall
 from agentdojo.task_suite.task_suite import TaskSuite
 
 from src.enforcers.base import EnforcerAdapter
-from src.enforcers.strict import StrictEnforcer
+from src.enforcers.strict import StrictEnforcer, ToolSchemas
 from src.gapfuzz.search import BypassResult, _effectful_calls, find_bypass
 from src.harm_oracle import CONFOUNDED_USER_TASKS, HarmOracle
 
@@ -190,6 +190,9 @@ def run_harm_sweep(
 
     for suite in suites.values():
         oracle = HarmOracle(suite)
+        # The suite's declared parameter types, so the reference can judge each
+        # restriction against the value the tool will execute (T1).
+        schemas = ToolSchemas.from_suite(suite)
         for task_id, injection_task in suite.injection_tasks.items():
             gt = oracle.ground_truth_calls(injection_task)
             effectful = _effectful_calls(gt)
@@ -220,6 +223,7 @@ def run_harm_sweep(
                 enforcer=enforcer,
                 oracle=oracle,
                 reference=reference,
+                tool_schemas=schemas,
             )
             report.results.append(
                 TaskHarmResult(

@@ -16,7 +16,7 @@ os.environ.pop("SECAGENT_SUITE", None)
 
 from src.config import bootstrap  # noqa: E402
 
-bootstrap(enable_progent=False)
+bootstrap()
 
 pytest.importorskip("secagent")
 

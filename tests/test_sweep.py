@@ -12,7 +12,7 @@ one number a reader is most likely to quote.
 
 That absence had a consequence, which is the second reason this file exists:
 because nothing asserted coverage, nobody noticed that the corpus can only
-generate a single policy *shape*, leaving eight of the eleven taxonomy classes
+generate a single policy *shape*, leaving seven of the eleven taxonomy classes
 structurally unreachable by the sweep. An untested generator does not complain
 about what it cannot produce.
 
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.enforcers.base import GapClass, GapInstance, Verdict
+from src.enforcers.base import PERMISSIVE_GAPS, GapClass, GapInstance, Verdict
 from src.enforcers.strict import StrictEnforcer
 from src.gapfuzz import attribution
 from src.gapfuzz.attribution import Attribution, attribute
@@ -53,9 +53,11 @@ pytest.importorskip("secagent", reason="Progent (secagent) not installed")
 #: what makes an accidental addition visible.
 EXPECTED_STYLES = {"pattern-pinned", "pattern-no-type", "format-only", "enum-exact"}
 
-#: Gap classes the sweep can actually produce. The other eight are pinned in
-#: tests/test_enforcement_gaps.py but are unreachable here - see the module
-#: docstring and test_sweep_coverage_ceiling_is_pinned.
+#: Admittance classes the sweep can actually produce. The other nine are pinned
+#: in tests/test_enforcement_gaps.py (B6 in tests/test_progent_subset_check.py)
+#: but are unreachable here - see the module docstring and
+#: test_sweep_coverage_ceiling_is_pinned. (C1 is not an admittance class at
+#: all; it is measured by the disclosure probe - tests/test_disclosure.py.)
 SWEPT_CLASSES = {
     GapClass.A1_UNANCHORED,
     GapClass.A3_TYPE_SCOPED_NOOP,
@@ -251,7 +253,7 @@ def test_leave_one_out_attributes_cooperating_fixes(monkeypatch):
     A1, A3 = GapClass.A1_UNANCHORED, GapClass.A3_TYPE_SCOPED_NOOP
 
     class Fake:
-        def __init__(self, fixes):
+        def __init__(self, fixes, schemas=None):
             self.fixes = frozenset(fixes)
 
         def would_allow(self, policy, tool, args):
@@ -407,12 +409,13 @@ def test_fragment_whose_intended_value_is_denied_is_skipped(progent, reference):
 
 
 def test_sweep_coverage_ceiling_is_pinned(slack_report):
-    """The sweep produces three of eleven taxonomy classes. Asserted, not hoped.
+    """The sweep produces three of the twelve admittance classes. Asserted, not hoped.
 
     This test deliberately pins an *incomplete* state. The taxonomy claims
-    A1-A5, B1-B5 and C; the sweep can only ever emit A1, A3 and A4, because the
-    corpus fixes the policy shape and the operators cannot add or remove
-    arguments (see the two tests above for each half of that).
+    A1-A5, B1-B6, T1 and C; the sweep can only ever emit A1, A3 and A4, because
+    the corpus fixes the policy shape, pins only string-typed arguments (so the
+    numeric coercion class T1 has nothing to bite), and the operators cannot
+    add or remove arguments (see the two tests above for each half of that).
 
     When the coverage work lands, this test fails - and that failure is the
     signal to update it, never to loosen it. The published claim and the
@@ -421,19 +424,39 @@ def test_sweep_coverage_ceiling_is_pinned(slack_report):
     produced = {i.gap_class for i in slack_report.instances}
     assert produced == SWEPT_CLASSES
 
-    unreachable = {g for g in GapClass} - SWEPT_CLASSES
+    # Measured over the *admittance* gaps only. C1 is a GapClass member now, but
+    # it is not a coverage gap: it has no admittance to sweep for, and it is
+    # measured instead by the disclosure probe (see the C1 tests below). Counting
+    # it as "unreachable" would report a permanent shortfall that no coverage
+    # work can ever close.
+    unreachable = set(PERMISSIVE_GAPS) - SWEPT_CLASSES
     assert produced & unreachable == set()
-    assert len(unreachable) == 7  # A2, A5, B1-B5; C is not yet a GapClass member
+    assert unreachable == {
+        GapClass.A2_RAW_REGEX,
+        GapClass.A5_UNCONSTRAINED_SIBLINGS,
+        GapClass.B1_ABSENT_ARG_SKIP,
+        GapClass.B2_FALLBACK_LEAK,
+        GapClass.B3_DENY_FAILS_OPEN,
+        GapClass.B4_PRECEDENCE_INVERSION,
+        GapClass.B5_NO_POLICY_ALLOWS,
+        GapClass.B6_SUBSET_CHECK_FAILS_OPEN,
+        GapClass.T1_TOOL_COERCION,
+    }
+    assert len(unreachable) == 9
+    assert GapClass.C1_BOUNDARY_DISCLOSURE not in unreachable
+    assert GapClass.C1_BOUNDARY_DISCLOSURE not in produced, "C1 must never be an admittance gap"
 
 
 def test_janus_and_progent_sweeps_are_identical(slack):
-    """The architectural claim, as a test instead of a hand-run comparison.
+    """The propagation claim on the swept classes, as a test.
 
-    Two engines, built by different teams, that nonetheless admit exactly the
-    same superset - instance for instance, class for class. This is what
-    separates "these two projects have a bug" from "this design has a hole", and
-    it was previously asserted only by a human running two commands and eyeballing
-    the tables.
+    Janus reimplements Progent's design with the same primitives, and on the
+    three classes the value-level corpus reaches (A1/A3/A4 - all of them
+    `jsonschema.validate` and `re` behaviour) it admits exactly the same
+    superset, instance for instance. That is what "the gap lives in the shared
+    primitives" means operationally. The per-class profile, including the
+    classes on which the two engines *differ*, is in
+    tests/test_janus_cross_engine.py.
     """
     pytest.importorskip("janus", reason="janus-guard not installed")
     from src.enforcers.janus import JanusEnforcer
